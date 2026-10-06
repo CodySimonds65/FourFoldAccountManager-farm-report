@@ -218,3 +218,89 @@ export function loadCustom(saved) {
 export function loadTotals(saved) {
   return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
 }
+
+// --- Live areas: FourFold's live game feed (plugin API 3) ---
+// The feed names the exact scene an account is in and reports each fight's XP and silver as it ends, so live areas
+// need no pick and aren't limited to one-minute reads. A fight's reward has no gold, so live areas count none.
+
+// One account's place in the stream of live events. `area` is the scene it last walked into; `active` is the area
+// whose clock is running, which starts at the area's first fight. Kept in memory only.
+export function createLiveTracker() {
+  return { at: null, area: null, active: null, lastActivityAt: null };
+}
+
+// Takes one live event: { type, at, className, ... } where type is 'location' (with scene and inBattle), 'start',
+// 'result' (with xp and silver), 'disconnect', or 'tick' (time passing with nothing new). Returns what it adds
+// ({ area, className, ms, xp, silver, battles }), or null when it adds nothing.
+export function liveStep(tracker, event) {
+  // Late or out of order: the time it would cover was already counted.
+  if (tracker.at !== null && event.at < tracker.at) return null;
+  const previousAt = tracker.at;
+  tracker.at = event.at;
+
+  // The time since the previous event goes to the area whose clock was running, the same way reads count: walking
+  // between fights counts, five quiet minutes still count, then the clock pauses until the next fight. A gap of
+  // more than three minutes means the app wasn't running, so it adds no time.
+  const ms = previousAt === null ? 0 : event.at - previousAt;
+  const idle = tracker.lastActivityAt === null || previousAt - tracker.lastActivityAt >= IDLE_MS;
+  const counted = { area: tracker.active, className: event.className, ms: 0, xp: 0, silver: 0, battles: 0 };
+  if (tracker.active !== null && !idle && ms <= MAX_INTERVAL_MS) counted.ms = ms;
+
+  switch (event.type) {
+    case 'location':
+      // A fight's own scene belongs to the area it was entered from, so only the scenes outside fights move it.
+      if (!event.inBattle && typeof event.scene === 'string' && event.scene !== tracker.area) {
+        tracker.area = event.scene;
+        tracker.active = null;
+      }
+      break;
+    case 'start':
+      if (tracker.area !== null) tracker.active = tracker.area;
+      tracker.lastActivityAt = event.at;
+      break;
+    case 'result':
+      // A reward without its fight start (the panel opened mid-fight) still belongs to the area it came from.
+      tracker.active ??= tracker.area;
+      tracker.lastActivityAt = event.at;
+      if (tracker.active !== null) {
+        counted.area = tracker.active;
+        counted.xp = event.xp;
+        counted.silver = event.silver;
+        counted.battles = 1;
+      }
+      break;
+    case 'disconnect':
+      // A reload or a closed panel stops the clock. The area is kept: after the re-login the game resumes the fight.
+      tracker.active = null;
+      break;
+  }
+
+  if (counted.area === null || typeof counted.className !== 'string' || (counted.ms === 0 && counted.battles === 0)) {
+    return null;
+  }
+  return counted;
+}
+
+// Live totals are kept as liveTotals[accountId][className][scene] = { ms, xp, silver, gold, battles }, the same shape
+// as the pick totals (gold is always 0), so ranking, reset and prune work on both.
+export function addLive(totals, accountId, counted) {
+  const byArea = ((totals[accountId] ??= {})[counted.className] ??= {});
+  const entry = (byArea[counted.area] ??= { ms: 0, xp: 0, silver: 0, gold: 0, battles: 0 });
+  for (const key of ['ms', 'xp', 'silver', 'battles']) entry[key] += counted[key];
+}
+
+// A scene's name as the panel shows it: westhills_b2_dungeon_01 is "Westhills B2 · Dungeon 1", coldwoods_arena is
+// "Coldwoods Arena". Built from the scene itself, so a new area in the game needs no update here.
+export function areaName(scene) {
+  const parts = String(scene ?? '').trim().split('_').filter(Boolean);
+  if (parts.length === 0) return 'Unknown area';
+  const word = part => (/^\d+$/.test(part) ? String(Number(part))
+    : /^[a-z]\d+$/i.test(part) ? part.toUpperCase()
+    : part[0].toUpperCase() + part.slice(1).toLowerCase());
+  const inside = parts.findIndex((part, index) => index > 0 && part.toLowerCase() === 'dungeon');
+  const name = inside > 0
+    ? `${parts.slice(0, inside).map(word).join(' ')} · ${parts.slice(inside).map(word).join(' ')}`
+    : parts.map(word).join(' ');
+  // Not cut to a card's length: the panel wraps long names, and a card clips them itself.
+  return name.replace(/[\p{Cc}\p{Cf}]/gu, '');
+}

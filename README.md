@@ -37,6 +37,20 @@ what a location pays depends on who is fighting there.
 Two limits follow from one-minute data. A short run is coarse, which is why 10 minutes are needed. And gaining more
 than one level inside a single minute undercounts XP.
 
+## Live areas
+
+On a FourFold with the live game feed (plugin API 3, switched on in FourFold's Settings), each account also gets
+**Live areas**: XP and silver per hour for every dungeon or arena it actually fights in, with nothing to pick. The
+feed names the exact area and reports every fight's reward as it ends, so these numbers aren't limited by one-minute
+reads. On an older FourFold the section doesn't appear and the plugin works as before.
+
+- An area's clock starts at its first fight there and includes walking between fights. A fight's own scene counts
+  toward the dungeon or arena it was entered from.
+- Five quiet minutes still count, then the clock pauses until the next fight, as for picks.
+- A reload or a closed panel stops the clock. A fight the game resumes after the re-login still counts for its area.
+- A fight's reward has no gold, so live areas show XP and silver only.
+- An area is ranked once it has 10 minutes counted. Results are kept per account and class, separately from picks.
+
 ## For plugin authors
 
 The counting rules are in `farm.mjs`, which touches neither the page nor `window.fourfold`, so they can be checked

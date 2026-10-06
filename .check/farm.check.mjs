@@ -1,8 +1,8 @@
 // Checks farm.mjs outside FourFold. Run: node .check/farm.check.mjs
 import assert from 'node:assert/strict';
 import {
-  BUILT_IN, RANKED_MS, UNLABELLED, absorb, addLocation, addTo, createTracker, loadCustom, loadTotals, merged, prefix,
-  prune, ranking, removeLocation, reset, step, toRead, waitingMs
+  BUILT_IN, RANKED_MS, UNLABELLED, absorb, addLive, addLocation, addTo, areaName, createLiveTracker, createTracker,
+  liveStep, loadCustom, loadTotals, merged, prefix, prune, ranking, removeLocation, reset, step, toRead, waitingMs
 } from '../farm.mjs';
 
 const MIN = 60000;
@@ -221,6 +221,110 @@ const sum = (counted, key) => counted.reduce((total, part) => total + part[key],
   assert.deepEqual(loadCustom('junk'), []);
   assert.deepEqual(loadTotals(['junk']), {});
   assert.deepEqual(loadTotals({ a: {} }), { a: {} });
+}
+
+// --- Live areas (FourFold's live game feed) ---
+
+const SEC = 1000;
+const DUNGEON = 'westhills_b2_dungeon_01';
+// Feeds live events to a fresh tracker, each with the class given, and adds what counted into fresh totals.
+const live = (...events) => {
+  const tracker = createLiveTracker();
+  const totals = {};
+  for (const event of events) {
+    const counted = liveStep(tracker, { className: 'Bandit', ...event, at: start + event.at });
+    if (counted) addLive(totals, 'a', counted);
+  }
+  return { tracker, area: scene => totals.a?.Bandit?.[scene] };
+};
+const enter = (at, scene) => ({ type: 'location', at, scene, inBattle: false });
+const fight = (at, scene = 'westhills_b2_battle_01') => ({ type: 'location', at, scene, inBattle: true });
+const begin = at => ({ type: 'start', at });
+const result = (at, xp, silver) => ({ type: 'result', at, xp, silver });
+
+// An area counts from its first fight, walking between fights included; the walk there and the town don't count.
+// The fight's scene belongs to the area it was entered from.
+{
+  const { area } = live(
+    enter(0, 'westhills_b2'),
+    enter(20 * SEC, DUNGEON),
+    fight(30 * SEC), begin(30 * SEC),
+    result(50 * SEC, 40, 15),
+    enter(52 * SEC, DUNGEON),
+    fight(70 * SEC), begin(70 * SEC),
+    result(90 * SEC, 104, 42),
+    { type: 'tick', at: 100 * SEC });
+  assert.deepEqual(area(DUNGEON), { ms: 70 * SEC, xp: 144, silver: 57, gold: 0, battles: 2 });
+  assert.equal(area('westhills_b2'), undefined);
+  assert.equal(area('westhills_b2_battle_01'), undefined);
+}
+
+// Leaving for another area stops the clock on the first; the new one starts at its own first fight.
+{
+  const { area } = live(
+    enter(0, DUNGEON), begin(0), result(30 * SEC, 10, 1),
+    enter(40 * SEC, 'coldwoods_arena'),
+    { type: 'tick', at: 100 * SEC },
+    begin(120 * SEC), result(150 * SEC, 20, 2));
+  assert.equal(area(DUNGEON).ms, 40 * SEC);
+  assert.deepEqual(area('coldwoods_arena'), { ms: 30 * SEC, xp: 20, silver: 2, gold: 0, battles: 1 });
+}
+
+// The idle rule: five quiet minutes still count, then the clock pauses until the next fight.
+{
+  const quiet = [1, 2, 3, 4, 5, 6, 7, 8].map(minute => ({ type: 'tick', at: 30 * SEC + minute * MIN }));
+  const { area } = live(enter(0, DUNGEON), begin(0), result(30 * SEC, 10, 1), ...quiet, begin(30 * SEC + 9 * MIN),
+    result(30 * SEC + 9 * MIN + 20 * SEC, 10, 1));
+  // 0:00-0:30 (the fight), then five quiet minutes to 5:30, then paused until the fight at 9:30, which runs 20 s.
+  assert.equal(area(DUNGEON).ms, 30 * SEC + 5 * MIN + 20 * SEC);
+  assert.equal(area(DUNGEON).battles, 2);
+}
+
+// A gap of more than three minutes between events (the app was asleep) adds no time. The reward still counts: the
+// feed reports it exactly.
+{
+  const { area } = live(enter(0, DUNGEON), begin(0), result(4 * MIN, 50, 5));
+  assert.deepEqual(area(DUNGEON), { ms: 0, xp: 50, silver: 5, gold: 0, battles: 1 });
+}
+
+// A reload pauses the clock. After the re-login the game resumes the fight, and its reward counts for the same area.
+{
+  const { area } = live(
+    enter(0, DUNGEON), begin(0),
+    { type: 'disconnect', at: 20 * SEC },
+    fight(50 * SEC), begin(50 * SEC),
+    result(60 * SEC, 88, 11));
+  assert.deepEqual(area(DUNGEON), { ms: 30 * SEC, xp: 88, silver: 11, gold: 0, battles: 1 });
+}
+
+// A reward that arrives without its fight start (the panel opened mid-fight) still counts for the area it came from.
+// Events out of order, or with no class yet, count nothing.
+{
+  const { area } = live(enter(0, DUNGEON), result(30 * SEC, 9, 3), result(20 * SEC, 500, 500));
+  assert.deepEqual(area(DUNGEON), { ms: 0, xp: 9, silver: 3, gold: 0, battles: 1 });
+  const tracker = createLiveTracker();
+  liveStep(tracker, { type: 'location', at: start, scene: DUNGEON, inBattle: false, className: null });
+  assert.equal(liveStep(tracker, { type: 'result', at: start + SEC, xp: 9, silver: 3, className: null }), null);
+}
+
+// Live areas rank with the same rules as picks: 10 minutes before a rate shows.
+{
+  const totals = {};
+  addLive(totals, 'a', { area: DUNGEON, className: 'Bandit', ms: 20 * MIN, xp: 1000, silver: 300, battles: 30 });
+  addLive(totals, 'a', { area: 'coldwoods_arena', className: 'Bandit', ms: RANKED_MS - 1, xp: 9999, silver: 0, battles: 1 });
+  const ranked = ranking(totals, 'a', 'Bandit', 'xp');
+  assert.deepEqual(ranked.map(row => [row.id, row.ranked, row.xp]), [[DUNGEON, true, 3000], ['coldwoods_arena', false, ranked[1].xp]]);
+  assert.equal(totals.a.Bandit[DUNGEON].battles, 30);
+}
+
+// Scene names as the panel shows them.
+{
+  assert.equal(areaName('westhills_b2_dungeon_01'), 'Westhills B2 · Dungeon 1');
+  assert.equal(areaName('coldwoods_arena'), 'Coldwoods Arena');
+  assert.equal(areaName('bellroot_a2'), 'Bellroot A2');
+  assert.equal(areaName('death_dunes_arena'), 'Death Dunes Arena');
+  assert.equal(areaName('plagued_grounds_c10_dungeon_12'), 'Plagued Grounds C10 · Dungeon 12');
+  assert.equal(areaName(''), 'Unknown area');
 }
 
 console.log('farm.mjs: all checks passed');

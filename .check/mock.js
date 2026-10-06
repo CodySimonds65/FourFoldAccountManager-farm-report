@@ -17,27 +17,42 @@
   const variable = name => `--ff-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`;
   for (const [name, value] of Object.entries(theme)) document.documentElement.style.setProperty(variable(name), value);
 
-  // Each account plays a short script, one step a minute: where it is and what it earns.
+  // Each account plays a short script, one step a minute: where it is and what it earns. `scenes` are the game's own
+  // scene names the live game feed reports for each step.
   const accounts = [
     { id: 'a1', label: 'Main', isOpen: true, className: 'Warrior', level: 34, xp: 4200, next: 90000, silver: 13025343, gold: 95050,
-      rate: 41200, script: ['Arena', 'Dungeon', 'Battle', 'Battle', 'Battle'], earn: { xp: 700, silver: 1400, gold: 1 } },
+      rate: 41200, script: ['Arena', 'Dungeon', 'Battle', 'Battle', 'Battle'], earn: { xp: 700, silver: 1400, gold: 1 },
+      scenes: { Arena: 'bellroot_a2', Dungeon: 'bellroot_a2_dungeon_01', Battle: 'bellroot_a2_battle_02', Town: 'bellroot' } },
     { id: 'a2', label: 'Alt with a rather long label', isOpen: true, className: 'Mage', level: 12, xp: 300, next: 6000, silver: 48210, gold: 310,
-      rate: 9800, script: ['Battle', 'Battle', 'Town'], earn: { xp: 160, silver: 220, gold: 0 }, stopsAt: 4 },
+      rate: 9800, script: ['Battle', 'Battle', 'Town'], earn: { xp: 160, silver: 220, gold: 0 }, stopsAt: 4,
+      scenes: { Arena: 'westhills_b2', Dungeon: 'westhills_b2_dungeon_01', Battle: 'westhills_b2_battle_01', Town: 'westhills' } },
     { id: 'a3', label: 'Banker', isOpen: true, className: null, level: null, xp: null, next: null, silver: 720000, gold: 12,
       rate: null, script: ['Town'], earn: { xp: 0, silver: 0, gold: 0 } },
     { id: 'a4', label: 'Closed one', isOpen: false, className: 'Rogue', level: 5, xp: 10, next: 500, silver: 900, gold: 2,
       rate: null, script: ['Town'], earn: { xp: 0, silver: 0, gold: 0 } }
   ];
   let minute = 0;
-  const listeners = { accounts: new Set(), xp: new Set() };
+  const listeners = {
+    accounts: new Set(), xp: new Set(),
+    location: new Set(), started: new Set(), ended: new Set(), result: new Set(), skill: new Set(),
+    loggedIn: new Set(), disconnected: new Set(), status: new Set()
+  };
+  const listen = set => callback => (set.add(callback), () => set.delete(callback));
+  const emit = (set, data) => set.forEach(callback => callback(JSON.parse(JSON.stringify(data))));
   const store = new Map();
   const cards = new Map();
+  // The live game feed (plugin API 3). Open preview.html?nolive to see the panel as an older FourFold shows it.
+  const withLive = !window.location.search.includes('nolive');
+  let liveStatus = { state: 'active', reason: null };
+  const where = new Map(); // account id -> its live location
 
   function advance() {
     minute++;
     for (const account of accounts.filter(candidate => candidate.isOpen && candidate.className)) {
-      const fighting = account.script[minute % account.script.length] === 'Battle';
-      if (!fighting || (account.stopsAt && minute >= account.stopsAt)) continue;
+      const step = account.script[minute % account.script.length];
+      const fighting = step === 'Battle' && !(account.stopsAt && minute >= account.stopsAt);
+      if (withLive && liveStatus.state === 'active') playLive(account, fighting ? 'Battle' : step === 'Battle' ? 'Dungeon' : step);
+      if (!fighting) continue;
       account.xp += account.earn.xp;
       account.silver += account.earn.silver;
       account.gold += account.earn.gold;
@@ -52,6 +67,30 @@
     show();
   }
 
+  // One minute of an account's game as the live feed reports it: a fight is its scene, start, end and reward, then the
+  // walk back to the dungeon; anything else is just where the account is.
+  function playLive(account, step) {
+    const at = new Date(clock()).toISOString();
+    const accountId = account.id;
+    const move = (scene, inBattle) => {
+      where.set(accountId, { accountId, scene, inBattle, at });
+      emit(listeners.location, where.get(accountId));
+    };
+    if (step !== 'Battle') {
+      move(account.scenes[step], false);
+      return;
+    }
+    move(account.scenes.Battle, true);
+    emit(listeners.started, { accountId, enemyCount: 3, at });
+    emit(listeners.ended, { accountId, at });
+    emit(listeners.result, {
+      accountId, expGained: account.earn.xp, silverGained: account.earn.silver, expNeededToNextLevel: account.next - account.xp,
+      leveledUp: false, reachedLevel: account.level, className: account.className, unlockedSkillName: null,
+      statGains: { maxHp: 0, maxSp: 0, hp: 0, sp: 0, att: 0, mag: 0, skl: 0, spd: 0, def: 0, res: 0, lck: 0 }, at
+    });
+    move(account.scenes.Dungeon, false);
+  }
+
   const find = id => {
     const account = accounts.find(candidate => candidate.id === id);
     if (!account) throw Object.assign(new Error('That account id isn\'t known.'), { code: 'invalid-argument' });
@@ -60,9 +99,18 @@
   const updatedAt = () => new Date(clock()).toISOString();
   const answer = value => Promise.resolve(JSON.parse(JSON.stringify(value)));
 
+  const liveApi = {
+    battle: { onStarted: listen(listeners.started), onEnded: listen(listeners.ended), onResult: listen(listeners.result),
+      onSkillResult: listen(listeners.skill) },
+    location: { get: id => (find(id), answer(where.get(id) ?? null)), onChanged: listen(listeners.location) },
+    session: { onLoggedIn: listen(listeners.loggedIn), onDisconnected: listen(listeners.disconnected) },
+    live: { getStatus: () => answer(liveStatus), onStatusChanged: listen(listeners.status) }
+  };
+
   window.fourfold = Object.freeze({
     plugin: Object.freeze({ id: 'preview.plugin', version: '0.0.0', apiVersion: 2 }),
     theme: Object.freeze(theme),
+    ...(withLive ? liveApi : {}),
     accounts: {
       list: () => answer(accounts.map(({ id, label, isOpen }) => ({ id, label, inGameName: null, isOpen }))),
       onChanged: callback => (listeners.accounts.add(callback), () => listeners.accounts.delete(callback))
@@ -114,6 +162,12 @@
   // For trying things by hand from the browser's console: previewStore() shows what the plugin has saved, and
   // previewToggle('a2') closes or reopens an account.
   window.previewStore = () => Object.fromEntries(store);
+  // previewLive('off') or previewLive('unavailable') switches the live game feed's status; previewLive('active')
+  // brings it back.
+  window.previewLive = (state, reason = null) => {
+    liveStatus = { state, reason };
+    emit(listeners.status, liveStatus);
+  };
   window.previewToggle = id => {
     const account = find(id);
     account.isOpen = !account.isOpen;

@@ -1,8 +1,9 @@
 // Farm report: XP, silver and gold per hour by where each account is fighting. The game never names the arena, so
-// the user picks it. The counting rules are in farm.mjs.
+// the user picks it. Where FourFold has the live game feed, each account also gets Live areas, counted from the exact
+// scene and every fight's reward. The counting rules are in farm.mjs.
 import {
-  BUILT_IN, UNLABELLED, absorb, addLocation, addTo, createTracker, isFighting, loadCustom, loadTotals, merged, prefix,
-  prune, ranking, removeLocation, reset, step, toRead, waitingMs
+  BUILT_IN, UNLABELLED, absorb, addLive, addLocation, addTo, areaName, createLiveTracker, createTracker, isFighting,
+  liveStep, loadCustom, loadTotals, merged, prefix, prune, ranking, removeLocation, reset, step, toRead, waitingMs
 } from './farm.mjs';
 
 const container = document.getElementById('accounts');
@@ -28,6 +29,14 @@ const shown = new Map(); // account id -> { label, className, fighting }: what t
 const classChoice = new Map(); // account id -> the class the user chose to look at, when it isn't the active one
 let sortKey = 'xp';
 let confirming = null; // the one control showing "Yes / No" right now, as "<account id>|<what>"
+
+// Live areas. The live game feed is FourFold's plugin API 3; on an older FourFold these namespaces don't exist and
+// none of this runs, so the plugin works there exactly as before.
+const live = typeof fourfold.location?.onChanged === 'function';
+let liveTotals = {}; // what live areas have counted, by account, class and scene; saved
+let saveLive = false;
+let liveState = null; // 'active', 'off' or 'unavailable', as FourFold reports the feed
+const liveTrackers = new Map(); // account id -> live tracker; open accounts only
 
 const exact = value => Math.round(value).toLocaleString('en-US');
 const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
@@ -182,6 +191,60 @@ function createBlock(id) {
   return parts;
 }
 
+// Feeds one live event to an account's tracker and adds what it counts. Nothing is counted while the feed isn't
+// active. A fight's reward names its class; any other event takes the class the last read saw.
+function liveEvent(id, event) {
+  if (liveState !== 'active') return false;
+  let tracker = liveTrackers.get(id);
+  if (!tracker) liveTrackers.set(id, (tracker = createLiveTracker()));
+  const counted = liveStep(tracker, { ...event, className: event.className ?? shown.get(id)?.className ?? null });
+  if (!counted) return false;
+  addLive(liveTotals, id, counted);
+  saveLive = true;
+  return true;
+}
+
+// The Live areas part of an account's block: its class's areas, ranked like the picks, XP and silver only.
+function liveRows(id, className) {
+  /** @type {HTMLElement[]} */
+  const rows = [element('p', 'live-head', 'Live areas')];
+  if (liveState !== 'active') {
+    rows.push(element('p', 'muted', liveState === 'off'
+      ? 'The live game feed is off in FourFold\'s Settings.'
+      : 'The live game feed isn\'t available right now.'));
+  }
+  // A fight's reward has no gold, so a gold sort ranks live areas by XP.
+  const ranked = ranking(liveTotals, id, className, sortKey === 'gold' ? 'xp' : sortKey);
+  const current = liveTrackers.get(id)?.active;
+  for (const entry of ranked) {
+    const battles = liveTotals[id][className][entry.id].battles;
+    const row = element('div', entry.id === current ? 'row current' : 'row');
+    const head = element('p', 'name', `${areaName(entry.id)} · ${span(entry.ms)} · ${battles} ${battles === 1 ? 'fight' : 'fights'}`);
+    head.append(confirmed(`${id}|live|${entry.id}`, '×', 'Reset', () => {
+      reset(liveTotals, id, className, entry.id);
+      saveLive = true;
+    }));
+    row.append(head);
+    if (entry.ranked) {
+      const rates = element('p', 'rates', `${short(entry.xp)} XP · ${short(entry.silver)} silver /hr`);
+      rates.title = `${exact(entry.xp)} XP and ${exact(entry.silver)} silver per hour`;
+      row.append(rates);
+    } else {
+      row.append(element('p', 'rates muted', 'Collecting'));
+    }
+    rows.push(row);
+  }
+  if (ranked.length === 0) {
+    rows.push(element('p', 'muted', 'Fight in a dungeon or arena and it shows here, no pick needed.'));
+  } else {
+    rows.push(confirmed(`${id}|live-class`, 'Reset live', `Reset live areas for ${className}`, () => {
+      reset(liveTotals, id, className);
+      saveLive = true;
+    }));
+  }
+  return rows;
+}
+
 // The body of one account's block: its class's ranking, the resets, and Unlabelled while nothing is picked.
 function body(id, className) {
   const rows = [];
@@ -247,6 +310,7 @@ function body(id, className) {
     reset(totals, id, className);
     saveTotals = true;
   }));
+  if (live) rows.push(...liveRows(id, className));
   return rows;
 }
 
@@ -318,9 +382,13 @@ async function setCard(id, className) {
 
 async function refresh() {
   const accounts = await fourfold.accounts.list();
+  const known = new Set(accounts.map(account => account.id));
   const before = Object.keys(totals).length;
-  prune(totals, new Set(accounts.map(account => account.id)));
+  prune(totals, known);
   if (Object.keys(totals).length !== before) saveTotals = true;
+  const liveBefore = Object.keys(liveTotals).length;
+  prune(liveTotals, known);
+  if (Object.keys(liveTotals).length !== liveBefore) saveLive = true;
 
   const open = accounts.filter(account => account.isOpen);
   // A closed account's session is over: its pick and its card go with it.
@@ -329,6 +397,7 @@ async function refresh() {
       // Its session is over: what it fought unlabelled joins the pick it closed with, or goes.
       settle(id);
       trackers.delete(id);
+      liveTrackers.delete(id);
       picks.delete(id);
       pickedAt.delete(id);
       classChoice.delete(id);
@@ -360,6 +429,8 @@ async function refresh() {
     // A choice of which class to look at doesn't outlive a change of the class being played.
     if (shown.get(account.id)?.className !== className) classChoice.delete(account.id);
     seen.set(account.id, { label: account.label, className, fighting: isFighting(tracker.last?.location) });
+    // Time passing between fights: keeps a live area's clock current, and lets the idle rule pause it.
+    if (live) liveEvent(account.id, { type: 'tick', at: Date.now() });
   }
   // Swapped in whole, so a click that lands while the reads are still coming in finds every block in place.
   shown.clear();
@@ -379,6 +450,10 @@ async function refresh() {
     saveTotals = false;
     await fourfold.storage.set('totals', totals).catch(error => { saveTotals = true; warn(error); });
   }
+  if (saveLive) {
+    saveLive = false;
+    await fourfold.storage.set('liveTotals', liveTotals).catch(error => { saveLive = true; warn(error); });
+  }
 }
 
 // Events arrive in bursts (xp.onUpdated fires once per account). Refreshes run one after another, and a burst asks
@@ -395,9 +470,44 @@ function render() {
   return queue;
 }
 
+// Live events arrive one at a time, every few seconds while fighting. A fight's reward goes through a full refresh,
+// which also saves it; the rest only need the panel redrawn.
+function startLive() {
+  const at = event => Date.parse(event.at);
+  fourfold.live.onStatusChanged(status => {
+    liveState = status.state;
+    // Time can't be counted across a stretch the feed didn't see.
+    if (liveState !== 'active') liveTrackers.clear();
+    redraw(true);
+  });
+  fourfold.location.onChanged(event => {
+    liveEvent(event.accountId, { type: 'location', at: at(event), scene: event.scene, inBattle: event.inBattle });
+    redraw();
+  });
+  fourfold.battle.onStarted(event => {
+    liveEvent(event.accountId, { type: 'start', at: at(event) });
+    redraw();
+  });
+  fourfold.battle.onResult(event => {
+    const counted = liveEvent(event.accountId, {
+      type: 'result', at: at(event), xp: event.expGained, silver: event.silverGained, className: event.className ?? undefined
+    });
+    if (counted) render();
+  });
+  fourfold.session.onDisconnected(event => {
+    liveEvent(event.accountId, { type: 'disconnect', at: at(event) });
+    redraw();
+  });
+}
+
 async function start() {
   totals = loadTotals(await fourfold.storage.get('totals'));
   custom = loadCustom(await fourfold.storage.get('custom'));
+  if (live) {
+    liveTotals = loadTotals(await fourfold.storage.get('liveTotals'));
+    liveState = (await fourfold.live.getStatus().catch(() => null))?.state ?? null;
+    startLive();
+  }
   fourfold.accounts.onChanged(render);
   fourfold.xp.onUpdated(render);
   // A safety net for a missed event; the reads themselves change about once a minute.
