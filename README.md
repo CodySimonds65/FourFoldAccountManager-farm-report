@@ -1,55 +1,40 @@
 # Farm report
 
-A plugin for [FourFold Account Manager](https://github.com/CodySimonds65/FourFoldAccountManager). It measures the XP,
-silver and gold an account earns per hour by where it is fighting, and ranks the locations for each class, so you can
-see which arena or dungeon pays best.
+A plugin for [FourFold Account Manager](https://github.com/CodySimonds65/FourFoldAccountManager). It measures the XP and
+silver an account earns per hour in every dungeon or arena it fights in, and ranks those areas for each class, so you
+can see which one pays best.
 
 It is listed on the [plugin hub](https://github.com/CodySimonds65/FourFoldAccountManager-plugin-hub), so FourFold
 users install it from the plugin list: the wrench in the plugin strip, then **Plugin hub**.
 
+## What it needs
+
+FourFold's live game feed (plugin API 3), switched on in FourFold's Settings. The feed reads each of your own game
+panels as you play: it names the exact area an account is in and reports every fight's reward the moment the fight
+ends. An older FourFold doesn't offer Farm report 2.0.
+
 ## How to use it
 
-The game doesn't say which arena a character is in: its profile reads "Arena" in every hub, "Dungeon" inside one and
-"Battle" in a fight. So you tell the plugin: pick the location in the account's **Farming** list before you go in.
-The list has the game's arenas and dungeons, and **Add location…** adds your own.
+There is nothing to set up. Open your accounts and fight; each account's block lists the areas it has fought in, with
+its XP and silver per hour there, the time counted and the number of fights. The area it's in now is highlighted.
 
-- Fighting with nothing picked shows as **Unlabelled**. Pick the location and those minutes show under it at once.
-  For the next half minute they follow the pick if you change it; after that they stay where they are. If they were
-  fought somewhere else, discard them first. Unlabelled is kept until the account closes.
-- A pick lasts until the account closes or FourFold restarts. It isn't remembered, so that a forgotten pick ends up
-  in Unlabelled, where you can fix it, and not under the wrong location.
-- A location is ranked once it has 10 minutes counted. Until then it shows "Collecting".
-- The overlay card shows the pick, its rates, and the class's best location.
+- A rate shows once an area has a minute counted, marked *early* until it has five. Areas with five minutes rank
+  above early ones.
+- Results are kept per account and class, because what an area pays depends on who is fighting there. The class is
+  read from each fight's reward, so switching class splits the totals at the next fight.
+- **×** resets one area, and **Reset** under the list resets the class.
+- The overlay card shows the current area, its rates, and the class's best area.
 
 ## How it counts
 
-FourFold reads an account about once a minute, and only while its game is open. Each minute between two reads counts
-toward the pick when:
-
-- the account was in Arena, Dungeon or Battle at the start of it. The hub counts, so a location that needs more
-  re-entering scores lower, as it should;
-- the active class was the same at both ends;
-- the account isn't idle: after 5 minutes with no XP, silver or gold gained, counting pauses until the next gain.
-
-Silver and gold count what was earned: spending doesn't lower a rate. Results are kept per account and class, because
-what a location pays depends on who is fighting there.
-
-Two limits follow from one-minute data. A short run is coarse, which is why 10 minutes are needed. And gaining more
-than one level inside a single minute undercounts XP.
-
-## Live areas
-
-On a FourFold with the live game feed (plugin API 3, switched on in FourFold's Settings), each account also gets
-**Live areas**: XP and silver per hour for every dungeon or arena it actually fights in, with nothing to pick. The
-feed names the exact area and reports every fight's reward as it ends, so these numbers aren't limited by one-minute
-reads. On an older FourFold the section doesn't appear and the plugin works as before.
-
-- An area's clock starts at its first fight there and includes walking between fights. A fight's own scene counts
-  toward the dungeon or arena it was entered from.
-- Five quiet minutes still count, then the clock pauses until the next fight, as for picks.
+- An area's clock starts at its first fight there and includes walking between fights, so an area that needs more
+  re-entering scores lower, as it should. A fight's own scene counts toward the dungeon or arena it was entered from.
+- Five quiet minutes still count; then the clock pauses until the next fight.
 - A reload or a closed panel stops the clock. A fight the game resumes after the re-login still counts for its area.
-- A fight's reward has no gold, so live areas show XP and silver only.
-- An area is ranked once it has 10 minutes counted. Results are kept per account and class, separately from picks.
+- A fight's reward has no gold, so Farm report counts XP and silver only.
+
+Farm report 1.x had you pick the location and counted from one-minute profile reads. Those totals can't be turned into
+areas, so 2.0 deletes them the first time it starts.
 
 ## For plugin authors
 
@@ -88,8 +73,9 @@ To look at the panel without FourFold, on made-up data:
 python -m http.server 8765
 ```
 
-then open `http://localhost:8765/.check/preview.html` in a window about 250 pixels wide. `.check/` is left out of the
-hub's package, because its name starts with a dot.
+then open `http://localhost:8765/.check/preview.html` in a window about 250 pixels wide (add `?nolive` to see the
+message a FourFold without the live game feed gets). `.check/` is left out of the hub's package, because its name
+starts with a dot.
 
 ## License
 

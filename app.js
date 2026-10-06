@@ -1,42 +1,26 @@
-// Farm report: XP, silver and gold per hour by where each account is fighting. The game never names the arena, so
-// the user picks it. Where FourFold has the live game feed, each account also gets Live areas, counted from the exact
-// scene and every fight's reward. The counting rules are in farm.mjs.
-import {
-  BUILT_IN, UNLABELLED, absorb, addLive, addLocation, addTo, areaName, createLiveTracker, createTracker, isFighting,
-  liveStep, loadCustom, loadTotals, merged, prefix, prune, ranking, removeLocation, reset, step, toRead, waitingMs
-} from './farm.mjs';
+// Farm report: XP and silver per hour for every dungeon or arena each account fights in, from FourFold's live game
+// feed. Nothing to pick: the feed names the exact area and reports every fight's reward. The counting rules are in
+// farm.mjs.
+import { addLive, areaName, createLiveTracker, liveStep, loadTotals, prefix, prune, ranking, reset } from './farm.mjs';
 
 const container = document.getElementById('accounts');
 const empty = document.getElementById('empty');
-const customList = document.getElementById('custom');
-const ADD = '+add';
+const statusLine = document.getElementById('status');
 
-let totals = {}; // what has been counted, by account, class and location; saved
-let custom = []; // the user's own locations; saved
+// The live game feed is FourFold's plugin API 3. plugin.json asks for it, so an older FourFold doesn't load this
+// plugin at all; the check is for a FourFold that loads it anyway.
+const hasFeed = typeof fourfold.location?.onChanged === 'function';
+let totals = {}; // what has been counted, by account, class and area; saved
 let saveTotals = false;
-let saveCustom = false;
-// What open accounts have fought with nothing picked, in the same shape as totals. In memory only, so it can only
-// ever join a location picked in the same session.
-const unlabelled = {};
-const picks = new Map(); // account id -> location id. In memory only: a forgotten pick must not outlive the session.
-const pickedAt = new Map(); // account id -> when its pick last changed
-// A pick takes the unlabelled minutes for good only once it has stood this long. Until then they are shown under it
-// but not moved: arrow keys pass through every option on the way, and a mis-click gets corrected.
-const SETTLE_MS = 30000;
-const trackers = new Map(); // account id -> tracker; open accounts only
+let feed = { state: null, reason: null }; // the live game feed's status as FourFold reports it
+const trackers = new Map(); // account id -> live tracker; open accounts only
+// account id -> the class the last fight was fought as. Before an account's first fight, the class the last read saw.
+const classOf = new Map();
 const blocks = new Map(); // account id -> that account's elements in the panel
-const shown = new Map(); // account id -> { label, className, fighting }: what the last refresh saw
-const classChoice = new Map(); // account id -> the class the user chose to look at, when it isn't the active one
+const shown = new Map(); // account id -> { label }: the open accounts the last refresh saw
+const classChoice = new Map(); // account id -> the class the user chose to look at, when it isn't the current one
 let sortKey = 'xp';
 let confirming = null; // the one control showing "Yes / No" right now, as "<account id>|<what>"
-
-// Live areas. The live game feed is FourFold's plugin API 3; on an older FourFold these namespaces don't exist and
-// none of this runs, so the plugin works there exactly as before.
-const live = typeof fourfold.location?.onChanged === 'function';
-let liveTotals = {}; // what live areas have counted, by account, class and scene; saved
-let saveLive = false;
-let liveState = null; // 'active', 'off' or 'unavailable', as FourFold reports the feed
-const liveTrackers = new Map(); // account id -> live tracker; open accounts only
 
 const exact = value => Math.round(value).toLocaleString('en-US');
 const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
@@ -44,10 +28,9 @@ const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFra
 const short = value => (Math.abs(value) >= 100000 ? compact.format(value) : exact(value));
 // A card's text can be at most 40 characters, and FourFold refuses a longer line, so clip it.
 const fit = text => (text.length > 40 ? `${prefix(text, 39)}…` : text);
-// A location's name with what follows it, in a card's 40 characters. When they don't fit, the name gives way, so
-// the number and its unit are never the part that is cut.
+// An area's name with what follows it, in a card's 40 characters. When they don't fit, the name gives way, so the
+// number and its unit are never the part that is cut.
 const named = (name, rest) => (name.length + rest.length > 40 ? `${prefix(name, 39 - rest.length)}…${rest}` : `${name}${rest}`);
-const nameOf = id => [...BUILT_IN, ...custom].find(location => location.id === id)?.name ?? 'Removed location';
 const warn = error => console.warn(error.code ?? error.message);
 
 function span(ms) {
@@ -82,21 +65,6 @@ function option(value, text) {
   return created;
 }
 
-// The locations as option groups: arenas, dungeons, then the user's own.
-function locationOptions() {
-  const groups = [
-    { label: 'Arenas', locations: BUILT_IN.filter(location => location.kind === 'arena') },
-    { label: 'Dungeons', locations: BUILT_IN.filter(location => location.kind === 'dungeon') },
-    { label: 'Your locations', locations: custom }
-  ];
-  return groups.filter(group => group.locations.length > 0).map(group => {
-    const created = element('optgroup');
-    created.label = group.label;
-    created.append(...group.locations.map(location => option(location.id, location.name)));
-    return created;
-  });
-}
-
 // A control that asks "Yes / No" in its own place before it acts, because confirm() does nothing in a plugin page.
 function confirmed(key, text, title, act) {
   if (confirming !== key) {
@@ -122,134 +90,39 @@ function confirmed(key, text, title, act) {
   return box;
 }
 
-// Sets what an account is farming. What it fought unlabelled this session shows under the pick at once, and is
-// moved there for good by settle().
-function pick(id, locationId) {
-  picks.set(id, locationId);
-  pickedAt.set(id, Date.now());
-}
-
-// Moves an account's unlabelled minutes into its pick and marks the totals for saving.
-function settle(id) {
-  if (picks.has(id) && absorb(unlabelled, totals, id, picks.get(id))) saveTotals = true;
-}
-
-// An account's totals as the panel and card show them: with unlabelled minutes under the pick while it settles.
-const shownTotals = id => (picks.has(id) ? merged(totals, unlabelled, id, picks.get(id)) : totals);
-
-// One account's block, built once. Its handlers look the account up by id, so they never hold stale data.
-function createBlock(id) {
-  const root = element('div', 'account');
-  const parts = { root, title: element('h2'), pick: element('select'), add: element('div', 'add'), body: element('div') };
-  const label = element('label', '', 'Farming');
-  label.append(parts.pick);
-  const input = element('input');
-  input.type = 'text';
-  input.maxLength = 30;
-  input.placeholder = 'Location name';
-  const problem = element('p', 'problem');
-  parts.add.hidden = true;
-
-  const close = () => {
-    parts.add.hidden = true;
-    input.value = '';
-    problem.textContent = '';
-  };
-  const add = () => {
-    const added = addLocation(custom, input.value);
-    if (!added) {
-      problem.textContent = 'Enter a name that isn\'t in the list yet.';
-      return;
-    }
-    saveCustom = true;
-    pick(id, added.id);
-    close();
-    redraw(true);
-    render();
-  };
-  input.addEventListener('keydown', event => {
-    if (event.key === 'Enter') add();
-    if (event.key === 'Escape') close();
-  });
-  parts.add.append(input, button('Add', '', add), button('Cancel', 'quiet', close), problem);
-
-  parts.pick.addEventListener('change', () => {
-    if (parts.pick.value === ADD) {
-      // "Add location…" is a command, not a pick: put the pick back and open the box.
-      parts.pick.value = picks.get(id) ?? '';
-      parts.add.hidden = false;
-      input.focus();
-      return;
-    }
-    if (parts.pick.value) pick(id, parts.pick.value);
-    else picks.delete(id);
-    redraw(true);
-    render();
-  });
-
-  root.append(parts.title, label, parts.add, parts.body);
-  return parts;
-}
-
 // Feeds one live event to an account's tracker and adds what it counts. Nothing is counted while the feed isn't
-// active. A fight's reward names its class; any other event takes the class the last read saw.
+// active. A fight's reward names its class; any other event takes the account's current class.
 function liveEvent(id, event) {
-  if (liveState !== 'active') return false;
-  let tracker = liveTrackers.get(id);
-  if (!tracker) liveTrackers.set(id, (tracker = createLiveTracker()));
-  const counted = liveStep(tracker, { ...event, className: event.className ?? shown.get(id)?.className ?? null });
+  if (feed.state !== 'active') return false;
+  let tracker = trackers.get(id);
+  if (!tracker) trackers.set(id, (tracker = createLiveTracker()));
+  if (typeof event.className === 'string') classOf.set(id, event.className);
+  const counted = liveStep(tracker, { ...event, className: classOf.get(id) ?? null });
   if (!counted) return false;
-  addLive(liveTotals, id, counted);
-  saveLive = true;
+  addLive(totals, id, counted);
+  saveTotals = true;
   return true;
 }
 
-// The Live areas part of an account's block: its class's areas, ranked like the picks, XP and silver only.
-function liveRows(id, className) {
-  /** @type {HTMLElement[]} */
-  const rows = [element('p', 'live-head', 'Live areas')];
-  if (liveState !== 'active') {
-    rows.push(element('p', 'muted', liveState === 'off'
-      ? 'The live game feed is off in FourFold\'s Settings.'
-      : 'The live game feed isn\'t available right now.'));
-  }
-  // A fight's reward has no gold, so a gold sort ranks live areas by XP.
-  const ranked = ranking(liveTotals, id, className, sortKey === 'gold' ? 'xp' : sortKey);
-  const current = liveTrackers.get(id)?.active;
-  for (const entry of ranked) {
-    const battles = liveTotals[id][className][entry.id].battles;
-    const row = element('div', entry.id === current ? 'row current' : 'row');
-    const head = element('p', 'name', `${areaName(entry.id)} · ${span(entry.ms)} · ${battles} ${battles === 1 ? 'fight' : 'fights'}`);
-    head.append(confirmed(`${id}|live|${entry.id}`, '×', 'Reset', () => {
-      reset(liveTotals, id, className, entry.id);
-      saveLive = true;
-    }));
-    row.append(head);
-    if (entry.ranked) {
-      const rates = element('p', 'rates', `${short(entry.xp)} XP · ${short(entry.silver)} silver /hr`);
-      rates.title = `${exact(entry.xp)} XP and ${exact(entry.silver)} silver per hour`;
-      row.append(rates);
-    } else {
-      row.append(element('p', 'rates muted', 'Collecting'));
-    }
-    rows.push(row);
-  }
-  if (ranked.length === 0) {
-    rows.push(element('p', 'muted', 'Fight in a dungeon or arena and it shows here, no pick needed.'));
-  } else {
-    rows.push(confirmed(`${id}|live-class`, 'Reset live', `Reset live areas for ${className}`, () => {
-      reset(liveTotals, id, className);
-      saveLive = true;
-    }));
-  }
-  return rows;
+// Where an account is now, as its block's second line says it.
+function whereText(id) {
+  const area = trackers.get(id)?.area;
+  return area ? `In ${areaName(area)}` : 'Not seen in an area yet';
 }
 
-// The body of one account's block: its class's ranking, the resets, and Unlabelled while nothing is picked.
+// One account's block, built once. Its handlers look the account up by id, so they never hold stale data.
+function createBlock() {
+  const root = element('div', 'account');
+  const parts = { root, title: element('h2'), where: element('p', 'where muted'), body: element('div') };
+  root.append(parts.title, parts.where, parts.body);
+  return parts;
+}
+
+// The body of one account's block: its class's areas, ranked, and the resets.
 function body(id, className) {
+  /** @type {HTMLElement[]} */
   const rows = [];
-  const view = shownTotals(id);
-  const classes = Object.keys(view[id] ?? {});
+  const classes = Object.keys(totals[id] ?? {});
   if (!classes.includes(className)) classes.unshift(className);
   if (classes.length > 1) {
     const choose = element('select', 'class');
@@ -262,21 +135,10 @@ function body(id, className) {
     rows.push(choose);
   }
 
-  // Only while nothing is picked: once there is a pick, these minutes show under it. One row for the account,
-  // whatever class fought them, because the next pick takes them all.
-  const waiting = picks.has(id) ? 0 : waitingMs(unlabelled, id);
-  if (waiting > 0) {
-    const row = element('div', 'row unlabelled');
-    const head = element('p', 'name', `Unlabelled · ${span(waiting)}`);
-    head.append(confirmed(`${id}|discard`, 'Discard', 'Discard', () => { delete unlabelled[id]; }));
-    row.append(head, element('p', 'rates muted', 'Pick a location above to count it there.'));
-    rows.push(row);
-  }
-
-  const ranked = ranking(view, id, className, sortKey);
+  const ranked = ranking(totals, id, className, sortKey);
   if (ranked.length > 0) {
     const sort = element('p', 'sort', 'Best by ');
-    for (const [key, text] of [['xp', 'XP'], ['silver', 'Silver'], ['gold', 'Gold']]) {
+    for (const [key, text] of [['xp', 'XP'], ['silver', 'Silver']]) {
       sort.append(button(text, key === sortKey ? 'quiet chosen' : 'quiet', () => {
         sortKey = key;
         redraw(true);
@@ -284,19 +146,21 @@ function body(id, className) {
     }
     rows.push(sort);
   }
+
+  const current = trackers.get(id)?.active;
   for (const entry of ranked) {
-    const row = element('div', picks.get(id) === entry.id ? 'row current' : 'row');
-    const head = element('p', 'name', `${nameOf(entry.id)} · ${span(entry.ms)}`);
+    const row = element('div', entry.id === current ? 'row current' : 'row');
+    const fights = `${entry.battles} ${entry.battles === 1 ? 'fight' : 'fights'}`;
+    const head = element('p', 'name', `${areaName(entry.id)} · ${span(entry.ms)} · ${fights}`);
     head.append(confirmed(`${id}|${entry.id}`, '×', 'Reset', () => {
-      // What is on show is what gets reset, so minutes still settling under the pick are moved in first.
-      settle(id);
       reset(totals, id, className, entry.id);
       saveTotals = true;
     }));
     row.append(head);
-    if (entry.ranked) {
-      const rates = element('p', 'rates', `${short(entry.xp)} XP · ${short(entry.silver)} silver · ${short(entry.gold)} gold /hr`);
-      rates.title = `${exact(entry.xp)} XP, ${exact(entry.silver)} silver and ${exact(entry.gold)} gold per hour`;
+    if (entry.rated) {
+      const rates = element('p', 'rates', `${short(entry.xp)} XP · ${short(entry.silver)} silver /hr`);
+      rates.title = `${exact(entry.xp)} XP and ${exact(entry.silver)} silver per hour`;
+      if (!entry.ranked) rates.append(element('span', 'muted', ' · early'));
       row.append(rates);
     } else {
       row.append(element('p', 'rates muted', 'Collecting'));
@@ -304,19 +168,31 @@ function body(id, className) {
     rows.push(row);
   }
 
-  if (ranked.length === 0 && waiting === 0) rows.push(element('p', 'muted', `Nothing counted for ${className} yet.`));
-  if (ranked.length > 0) rows.push(confirmed(`${id}|class`, `Reset ${className}`, `Reset all of ${className}`, () => {
-    settle(id);
-    reset(totals, id, className);
-    saveTotals = true;
-  }));
-  if (live) rows.push(...liveRows(id, className));
+  if (ranked.length === 0) {
+    rows.push(element('p', 'muted', `Nothing counted for ${className} yet. Fight in a dungeon or arena.`));
+  } else {
+    rows.push(confirmed(`${id}|class`, `Reset ${className}`, `Reset all of ${className}`, () => {
+      reset(totals, id, className);
+      saveTotals = true;
+    }));
+  }
   return rows;
+}
+
+function statusText() {
+  if (!hasFeed) return 'This FourFold has no live game feed. Update FourFold to use Farm report.';
+  if (feed.state === 'off') return 'The live game feed is off. Switch it on in FourFold\'s Settings.';
+  if (feed.state === 'unavailable') return `The live game feed isn't available: ${feed.reason ?? 'unknown reason'}`;
+  return '';
 }
 
 // Draws everything from what the last refresh saw. A refresh leaves alone whatever the user is in the middle of
 // using; `force` is for when the user has just acted and must see the result.
 function redraw(force = false) {
+  const status = statusText();
+  statusLine.textContent = status;
+  statusLine.hidden = status === '';
+
   for (const [id, parts] of blocks) {
     if (!shown.has(id)) {
       parts.root.remove();
@@ -325,139 +201,81 @@ function redraw(force = false) {
   }
   [...shown].forEach(([id, account], index) => {
     let parts = blocks.get(id);
-    if (!parts) blocks.set(id, (parts = createBlock(id)));
+    if (!parts) blocks.set(id, (parts = createBlock()));
     // Moving a block drops its focus, so only move one that is out of place.
     if (container.children[index] !== parts.root) container.insertBefore(parts.root, container.children[index] ?? null);
     parts.title.textContent = account.label;
     parts.title.title = account.label;
-    parts.root.classList.toggle('unpicked', account.fighting && !picks.has(id));
-
-    // Never rebuild a control the user is in the middle of using.
-    if (force || document.activeElement !== parts.pick) {
-      parts.pick.replaceChildren(option('', 'Not farming'), ...locationOptions(), option(ADD, 'Add location…'));
-      parts.pick.value = picks.get(id) ?? '';
-    }
+    parts.where.textContent = whereText(id);
     if (force || !parts.body.contains(document.activeElement)) {
       const chosen = classChoice.get(id);
-      const className = chosen && shownTotals(id)[id]?.[chosen] ? chosen : account.className;
+      const className = chosen && totals[id]?.[chosen] ? chosen : classOf.get(id);
       if (className) parts.body.replaceChildren(...body(id, className));
-      else parts.body.replaceChildren(element('p', 'muted', 'Waiting for this account\'s first read.'));
+      else parts.body.replaceChildren(element('p', 'muted', 'Waiting for this account\'s class.'));
     }
   });
   empty.hidden = shown.size > 0;
-
-  if (force || !customList.contains(document.activeElement)) {
-    const rows = custom.map(location => {
-      const row = element('p', 'name', location.name);
-      row.append(confirmed(`custom|${location.id}`, '×', 'Delete, with its data', () => {
-        removeLocation(totals, location.id);
-        custom = custom.filter(other => other.id !== location.id);
-        for (const [id, pick] of picks) {
-          if (pick === location.id) picks.delete(id);
-        }
-        saveTotals = true;
-        saveCustom = true;
-      }));
-      return row;
-    });
-    customList.replaceChildren(...(rows.length > 0 ? rows : [element('p', 'muted', 'None yet. Use "Add location…" in a Farming list.')]));
-  }
 }
 
-async function setCard(id, className) {
-  const pick = picks.get(id);
-  const ranked = className ? ranking(shownTotals(id), id, className, 'xp') : [];
-  const mine = ranked.find(entry => entry.id === pick);
+async function setCard(id) {
+  const className = classOf.get(id);
+  const ranked = className ? ranking(totals, id, className, 'xp') : [];
+  const area = trackers.get(id)?.active ?? trackers.get(id)?.area ?? null;
+  const mine = ranked.find(entry => entry.id === area);
   const best = ranked.find(entry => entry.ranked);
-  const rows = [{ label: 'Farming', value: fit(pick ? nameOf(pick) : 'Not picked') }];
-  if (pick) {
+  const rows = [{ label: 'Area', value: fit(area ? areaName(area) : 'Not seen yet') }];
+  if (area) {
     rows.push(
-      { label: 'XP/hr', value: mine?.ranked ? short(mine.xp) : 'Collecting' },
-      { label: 'Silver/hr', value: mine?.ranked ? short(mine.silver) : 'Collecting' });
+      { label: 'XP/hr', value: mine?.rated ? short(mine.xp) : 'Collecting' },
+      { label: 'Silver/hr', value: mine?.rated ? short(mine.silver) : 'Collecting' });
   }
-  if (best && best.id !== pick) rows.push({ label: 'Best', value: named(nameOf(best.id), ` ${short(best.xp)}`) });
-  const summary = !pick ? 'Not picked' : named(nameOf(pick), mine?.ranked ? `: ${short(mine.xp)} XP/hr` : ': collecting');
+  if (best && best.id !== area) rows.push({ label: 'Best', value: named(areaName(best.id), ` ${short(best.xp)}`) });
+  const summary = !area ? 'Not seen yet' : named(areaName(area), mine?.rated ? `: ${short(mine.xp)} XP/hr` : ': collecting');
   await fourfold.cards.set('farm', id, { summary, rows });
 }
 
 async function refresh() {
   const accounts = await fourfold.accounts.list();
-  const known = new Set(accounts.map(account => account.id));
   const before = Object.keys(totals).length;
-  prune(totals, known);
+  prune(totals, new Set(accounts.map(account => account.id)));
   if (Object.keys(totals).length !== before) saveTotals = true;
-  const liveBefore = Object.keys(liveTotals).length;
-  prune(liveTotals, known);
-  if (Object.keys(liveTotals).length !== liveBefore) saveLive = true;
 
   const open = accounts.filter(account => account.isOpen);
-  // A closed account's session is over: its pick and its card go with it.
-  for (const id of [...trackers.keys()]) {
+  for (const id of [...shown.keys()]) {
     if (open.every(account => account.id !== id)) {
-      // Its session is over: what it fought unlabelled joins the pick it closed with, or goes.
-      settle(id);
+      // A closed account's session is over: its clock and its card go with it. Its totals stay.
       trackers.delete(id);
-      liveTrackers.delete(id);
-      picks.delete(id);
-      pickedAt.delete(id);
+      classOf.delete(id);
       classChoice.delete(id);
-      delete unlabelled[id];
       await fourfold.cards.clear('farm', id).catch(() => {});
     }
   }
 
-  const seen = new Map();
-  for (const account of open) {
-    let tracker = trackers.get(account.id);
-    if (!tracker) trackers.set(account.id, (tracker = createTracker()));
-    const xp = await fourfold.xp.get(account.id);
-    const profile = await fourfold.profile.get(account.id);
-    // FourFold has started this account's tracking over (its profile was edited, say). The reads before and after
-    // may not even be of the same player, so nothing is measured across the restart.
-    if (xp.updatedAt === null) trackers.set(account.id, (tracker = createTracker()));
-    // Both answers come from one read. If a new read landed between the two calls, wait for the next refresh.
-    const read = xp.updatedAt === profile.updatedAt ? toRead(xp, profile) : null;
-    const counted = read ? step(tracker, read) : null;
-    if (counted && picks.has(account.id)) {
-      addTo(totals, account.id, picks.get(account.id), counted);
-      saveTotals = true;
-    } else if (counted) {
-      addTo(unlabelled, account.id, UNLABELLED, counted);
-    }
-    if (picks.has(account.id) && Date.now() - pickedAt.get(account.id) >= SETTLE_MS) settle(account.id);
-    const className = tracker.last?.className ?? null;
-    // A choice of which class to look at doesn't outlive a change of the class being played.
-    if (shown.get(account.id)?.className !== className) classChoice.delete(account.id);
-    seen.set(account.id, { label: account.label, className, fighting: isFighting(tracker.last?.location) });
-    // Time passing between fights: keeps a live area's clock current, and lets the idle rule pause it.
-    if (live) liveEvent(account.id, { type: 'tick', at: Date.now() });
-  }
-  // Swapped in whole, so a click that lands while the reads are still coming in finds every block in place.
   shown.clear();
-  for (const [id, account] of seen) shown.set(id, account);
+  for (const account of open) {
+    // Before an account's first fight, its class is what the last read saw.
+    if (!classOf.has(account.id)) {
+      const xp = await fourfold.xp.get(account.id).catch(() => null);
+      if (typeof xp?.className === 'string') classOf.set(account.id, xp.className);
+    }
+    shown.set(account.id, { label: account.label });
+    // Time passing between fights: keeps an area's clock current, and lets the idle rule pause it.
+    liveEvent(account.id, { type: 'tick', at: Date.now() });
+  }
 
   redraw();
-  for (const [id, account] of shown) {
+  for (const id of shown.keys()) {
     // A refused card must not stop the panel from updating.
-    await setCard(id, account.className).catch(warn);
+    await setCard(id).catch(warn);
   }
-  // A refused save is tried again at the next refresh. The locations go first, because the totals name them.
-  if (saveCustom) {
-    saveCustom = false;
-    await fourfold.storage.set('custom', custom).catch(error => { saveCustom = true; warn(error); });
-  }
+  // A refused save is tried again at the next refresh.
   if (saveTotals) {
     saveTotals = false;
-    await fourfold.storage.set('totals', totals).catch(error => { saveTotals = true; warn(error); });
-  }
-  if (saveLive) {
-    saveLive = false;
-    await fourfold.storage.set('liveTotals', liveTotals).catch(error => { saveLive = true; warn(error); });
+    await fourfold.storage.set('liveTotals', totals).catch(error => { saveTotals = true; warn(error); });
   }
 }
 
-// Events arrive in bursts (xp.onUpdated fires once per account). Refreshes run one after another, and a burst asks
-// for one more refresh, not one each.
+// Refreshes run one after another, and a burst of requests asks for one more refresh, not one each.
 let queue = Promise.resolve();
 let waiting = false;
 function render() {
@@ -471,13 +289,13 @@ function render() {
 }
 
 // Live events arrive one at a time, every few seconds while fighting. A fight's reward goes through a full refresh,
-// which also saves it; the rest only need the panel redrawn.
-function startLive() {
+// which also saves it and updates the card; the rest only need the panel redrawn.
+function listen() {
   const at = event => Date.parse(event.at);
   fourfold.live.onStatusChanged(status => {
-    liveState = status.state;
+    feed = status;
     // Time can't be counted across a stretch the feed didn't see.
-    if (liveState !== 'active') liveTrackers.clear();
+    if (feed.state !== 'active') trackers.clear();
     redraw(true);
   });
   fourfold.location.onChanged(event => {
@@ -489,10 +307,10 @@ function startLive() {
     redraw();
   });
   fourfold.battle.onResult(event => {
-    const counted = liveEvent(event.accountId, {
+    liveEvent(event.accountId, {
       type: 'result', at: at(event), xp: event.expGained, silver: event.silverGained, className: event.className ?? undefined
     });
-    if (counted) render();
+    render();
   });
   fourfold.session.onDisconnected(event => {
     liveEvent(event.accountId, { type: 'disconnect', at: at(event) });
@@ -500,18 +318,26 @@ function startLive() {
   });
 }
 
-async function start() {
-  totals = loadTotals(await fourfold.storage.get('totals'));
-  custom = loadCustom(await fourfold.storage.get('custom'));
-  if (live) {
-    liveTotals = loadTotals(await fourfold.storage.get('liveTotals'));
-    liveState = (await fourfold.live.getStatus().catch(() => null))?.state ?? null;
-    startLive();
+// Farm report 1.x counted picked locations from one-minute reads. Those totals can't be turned into areas, so 2.0
+// deletes them, once, to free the plugin's storage.
+async function dropPickData() {
+  for (const key of ['totals', 'custom']) {
+    if ((await fourfold.storage.get(key)) !== null) await fourfold.storage.remove(key);
   }
+}
+
+async function start() {
+  if (!hasFeed) {
+    redraw(true);
+    return;
+  }
+  await dropPickData().catch(warn);
+  totals = loadTotals(await fourfold.storage.get('liveTotals'));
+  feed = await fourfold.live.getStatus().catch(() => feed);
+  listen();
   fourfold.accounts.onChanged(render);
-  fourfold.xp.onUpdated(render);
-  // A safety net for a missed event; the reads themselves change about once a minute.
-  setInterval(render, 60000);
+  // A safety net for a missed event, and the clock between fights.
+  setInterval(render, 30000);
   await render();
 }
 

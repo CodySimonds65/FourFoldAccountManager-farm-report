@@ -24,7 +24,7 @@
       rate: 41200, script: ['Arena', 'Dungeon', 'Battle', 'Battle', 'Battle'], earn: { xp: 700, silver: 1400, gold: 1 },
       scenes: { Arena: 'bellroot_a2', Dungeon: 'bellroot_a2_dungeon_01', Battle: 'bellroot_a2_battle_02', Town: 'bellroot' } },
     { id: 'a2', label: 'Alt with a rather long label', isOpen: true, className: 'Mage', level: 12, xp: 300, next: 6000, silver: 48210, gold: 310,
-      rate: 9800, script: ['Battle', 'Battle', 'Town'], earn: { xp: 160, silver: 220, gold: 0 }, stopsAt: 4,
+      rate: 9800, script: ['Dungeon', 'Battle', 'Battle'], earn: { xp: 160, silver: 220, gold: 0 }, stopsAt: 9,
       scenes: { Arena: 'westhills_b2', Dungeon: 'westhills_b2_dungeon_01', Battle: 'westhills_b2_battle_01', Town: 'westhills' } },
     { id: 'a3', label: 'Banker', isOpen: true, className: null, level: null, xp: null, next: null, silver: 720000, gold: 12,
       rate: null, script: ['Town'], earn: { xp: 0, silver: 0, gold: 0 } },
@@ -41,7 +41,7 @@
   const emit = (set, data) => set.forEach(callback => callback(JSON.parse(JSON.stringify(data))));
   const store = new Map();
   const cards = new Map();
-  // The live game feed (plugin API 3). Open preview.html?nolive to see the panel as an older FourFold shows it.
+  // The live game feed (plugin API 3). Open preview.html?nolive to see what the panel says without it.
   const withLive = !window.location.search.includes('nolive');
   let liveStatus = { state: 'active', reason: null };
   const where = new Map(); // account id -> its live location
@@ -108,7 +108,7 @@
   };
 
   window.fourfold = Object.freeze({
-    plugin: Object.freeze({ id: 'preview.plugin', version: '0.0.0', apiVersion: 2 }),
+    plugin: Object.freeze({ id: 'preview.plugin', version: '0.0.0', apiVersion: withLive ? 3 : 2 }),
     theme: Object.freeze(theme),
     ...(withLive ? liveApi : {}),
     accounts: {

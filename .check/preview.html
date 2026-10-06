@@ -1,7 +1,8 @@
 <!doctype html>
 <!-- The panel in an ordinary browser, on made-up data from mock.js. Serve the repository's folder over http (a page
      opened from disk can't load modules), for example: python -m http.server 8765 -- then open
-     http://localhost:8765/.check/preview.html in a window about 250 pixels wide, the panel's width in FourFold. -->
+     http://localhost:8765/.check/preview.html in a window about 250 pixels wide, the panel's width in FourFold. Add
+     ?nolive to see what a FourFold without the live game feed shows. -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -12,13 +13,10 @@
 </head>
 <body>
   <h1>Farm report</h1>
-  <p class="muted">Pick where each account is fighting to see what it earns there per hour.</p>
+  <p class="muted">XP and silver per hour for every dungeon or arena your accounts fight in, live.</p>
+  <p id="status" class="problem" hidden></p>
   <p id="empty" class="muted" hidden>Open an account to start a report.</p>
   <div id="accounts"></div>
-  <details>
-    <summary>Manage locations</summary>
-    <div id="custom"></div>
-  </details>
   <pre id="preview-cards"></pre>
   <script src="mock.js"></script>
   <script type="module" src="../app.js"></script>
