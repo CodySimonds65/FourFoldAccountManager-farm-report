@@ -1,0 +1,198 @@
+// The Farm report's counting rules, totals and locations. Nothing here touches the page or window.fourfold, so
+// .check/farm.check.mjs can run it with Node.
+
+const HOUR_MS = 3600000;
+// Reads are a minute apart. A longer gap means reads were missed, and what happened in it is unknown.
+const MAX_INTERVAL_MS = 3 * 60000;
+// With no gain for this long, counting pauses until the next one.
+const IDLE_MS = 5 * 60000;
+// A location is ranked once it has this much time counted. One-minute data makes a shorter run unreliable.
+export const RANKED_MS = 10 * 60000;
+// The name fighting with nothing picked is counted under. It waits apart from the saved totals, for the session
+// only, until the user picks a location (it joins that one) or discards it.
+export const UNLABELLED = 'unlabelled';
+
+// The profile page never names the arena: it says Arena in every hub, Dungeon inside one, and Battle in a fight.
+const FIGHTING = ['arena', 'dungeon', 'battle'];
+
+// The ids are what is saved, so a location can be renamed here without losing its data.
+export const BUILT_IN = [
+  { id: 'bellroot-arena', name: 'Bellroot Arena', kind: 'arena' },
+  { id: 'bleakwoods-arena', name: 'Bleakwoods Arena', kind: 'arena' },
+  { id: 'coldwoods-arena', name: 'Coldwoods Arena', kind: 'arena' },
+  { id: 'deafields-arena', name: 'Deafields Arena', kind: 'arena' },
+  { id: 'summerville-arena', name: 'Summerville Arena', kind: 'arena' },
+  { id: 'westhills-arena', name: 'Westhills Arena', kind: 'arena' },
+  { id: 'underworld-arena', name: 'Underworld Arena', kind: 'arena' },
+  { id: 'plagued-grounds-arena', name: 'Plagued Grounds Arena', kind: 'arena' },
+  { id: 'death-dunes-arena', name: 'Death Dunes Arena', kind: 'arena' },
+  { id: 'bellroot-g1', name: 'Bellroot G1', kind: 'dungeon' }
+];
+
+export const isFighting = location => typeof location === 'string' && FIGHTING.includes(location.trim().toLowerCase());
+
+// One answer pair from fourfold.xp.get and fourfold.profile.get, cut down to what counting needs. Null when it
+// isn't a read: the account is closed or stale, or has no active class to count for.
+export function toRead(xp, profile) {
+  const at = typeof xp.updatedAt === 'string' ? Date.parse(xp.updatedAt) : NaN;
+  if (xp.isStale || Number.isNaN(at) || typeof xp.className !== 'string') return null;
+  return {
+    at,
+    className: xp.className,
+    level: xp.level,
+    currentXp: xp.currentXp,
+    nextLevelXp: xp.nextLevelXp,
+    silver: profile.silver,
+    gold: profile.gold,
+    location: profile.location
+  };
+}
+
+// Earned only: a drop is spending, and a missing value is no gain.
+const increase = (before, after) => (Number.isFinite(before) && Number.isFinite(after) ? Math.max(0, after - before) : 0);
+
+// The active class's progress between two reads of the same class. Across a level-up it is what was left of the old
+// level plus the progress into the new one; the levels between, when more than one was gained, aren't known.
+function xpGained(before, after) {
+  if (!Number.isFinite(before.level) || !Number.isFinite(after.level)) return 0;
+  if (after.level === before.level) return increase(before.currentXp, after.currentXp);
+  if (after.level < before.level || !Number.isFinite(after.currentXp)) return 0;
+  return increase(before.currentXp, before.nextLevelXp) + after.currentXp;
+}
+
+// One account's place in the stream of reads. Kept in memory only: a closed account starts over.
+export function createTracker() {
+  return { last: null, lastGainAt: null };
+}
+
+// Takes one read. Returns what the interval since the previous read adds ({ className, ms, xp, silver, gold }), or
+// null when that interval doesn't count.
+export function step(tracker, read) {
+  const previous = tracker.last;
+  // The same read again: xp.onUpdated also fires for changes that aren't a new read.
+  if (previous && read.at <= previous.at) return null;
+  tracker.last = read;
+  if (!previous) {
+    tracker.lastGainAt = read.at;
+    return null;
+  }
+
+  const ms = read.at - previous.at;
+  if (ms > MAX_INTERVAL_MS) {
+    // Nothing trustworthy to measure across the gap, so counting starts fresh from here.
+    tracker.lastGainAt = read.at;
+    return null;
+  }
+
+  const sameClass = previous.className === read.className;
+  const gain = {
+    xp: sameClass ? xpGained(previous, read) : 0,
+    silver: increase(previous.silver, read.silver),
+    gold: increase(previous.gold, read.gold)
+  };
+  const gained = gain.xp > 0 || gain.silver > 0 || gain.gold > 0;
+  const wasIdle = previous.at - tracker.lastGainAt >= IDLE_MS;
+  if (gained) tracker.lastGainAt = read.at;
+
+  // By where the interval started: the minute that ends back in town still holds the last battle's reward, and the
+  // minute spent walking to the arena holds none.
+  if (!sameClass || !isFighting(previous.location) || (wasIdle && !gained)) return null;
+  return { className: read.className, ms, ...gain };
+}
+
+// Totals are kept as totals[accountId][className][locationId] = { ms, xp, silver, gold }.
+export function addTo(totals, accountId, locationId, counted) {
+  const byLocation = ((totals[accountId] ??= {})[counted.className] ??= {});
+  const entry = (byLocation[locationId] ??= { ms: 0, xp: 0, silver: 0, gold: 0 });
+  for (const key of ['ms', 'xp', 'silver', 'gold']) entry[key] += counted[key];
+}
+
+// Removes what `select` picks from one account and class, then drops any container left empty.
+function remove(totals, accountId, className, select) {
+  const byClass = totals[accountId];
+  const byLocation = byClass?.[className];
+  if (!byLocation) return;
+  for (const id of Object.keys(byLocation)) {
+    if (select(id)) delete byLocation[id];
+  }
+  if (Object.keys(byLocation).length === 0) delete byClass[className];
+  if (Object.keys(byClass).length === 0) delete totals[accountId];
+}
+
+// Clears one location for an account and class, or the whole class when no location is given.
+export function reset(totals, accountId, className, locationId) {
+  remove(totals, accountId, className, id => locationId === undefined || id === locationId);
+}
+
+// The user has picked a location: what the account fought unlabelled this session joins it, every class of it.
+// Returns whether there was anything to move.
+export function absorb(waiting, totals, accountId, locationId) {
+  const byClass = waiting[accountId];
+  if (!byClass) return false;
+  for (const [className, byLocation] of Object.entries(byClass)) {
+    if (byLocation[UNLABELLED]) addTo(totals, accountId, locationId, { className, ...byLocation[UNLABELLED] });
+  }
+  delete waiting[accountId];
+  return true;
+}
+
+// Drops a location's data from every account and class, as when the user deletes one of their own.
+export function removeLocation(totals, locationId) {
+  for (const accountId of Object.keys(totals)) {
+    for (const className of Object.keys(totals[accountId])) reset(totals, accountId, className, locationId);
+  }
+}
+
+// Drops accounts that no longer exist, so the store doesn't grow for ever.
+export function prune(totals, knownAccountIds) {
+  for (const accountId of Object.keys(totals)) {
+    if (!knownAccountIds.has(accountId)) delete totals[accountId];
+  }
+}
+
+// One account and class's locations with their rates per hour, best first by `key` ('xp', 'silver' or 'gold').
+// Locations still collecting come last.
+export function ranking(totals, accountId, className, key) {
+  const byLocation = totals[accountId]?.[className] ?? {};
+  return Object.entries(byLocation)
+    .filter(([, entry]) => entry.ms > 0)
+    .map(([id, entry]) => ({
+      id,
+      ms: entry.ms,
+      ranked: entry.ms >= RANKED_MS,
+      xp: entry.xp * HOUR_MS / entry.ms,
+      silver: entry.silver * HOUR_MS / entry.ms,
+      gold: entry.gold * HOUR_MS / entry.ms
+    }))
+    .sort((a, b) => Number(b.ranked) - Number(a.ranked) || b[key] - a[key]);
+}
+
+// A name as typed: without control or invisible formatting characters (a card refuses text that has them), with
+// runs of spaces closed up, and at most 30 characters so it fits a card's row.
+function cleanName(text) {
+  return String(text).replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 30).trim();
+}
+
+// Adds one of the user's own locations. Returns it, or null when the name is empty or already in use.
+export function addLocation(custom, text) {
+  const name = cleanName(text);
+  const taken = [...BUILT_IN, ...custom].some(location => location.name.toLowerCase() === name.toLowerCase());
+  if (!name || taken) return null;
+  const highest = custom.reduce((most, location) => Math.max(most, Number(location.id.slice('custom-'.length)) || 0), 0);
+  const added = { id: `custom-${highest + 1}`, name };
+  custom.push(added);
+  return added;
+}
+
+// What was saved, kept only where it has the shape this plugin writes.
+export function loadCustom(saved) {
+  if (!Array.isArray(saved)) return [];
+  return saved
+    .filter(location => location && typeof location.id === 'string' && location.id.startsWith('custom-') &&
+      typeof location.name === 'string')
+    .map(location => ({ id: location.id, name: location.name }));
+}
+
+export function loadTotals(saved) {
+  return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+}

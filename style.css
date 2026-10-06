@@ -1,0 +1,26 @@
+body { margin: 0; padding: 14px; background: var(--ff-surface); color: var(--ff-text); font: 13px "Segoe UI", sans-serif; }
+h1 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+p { margin: 3px 0 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+.muted { color: var(--ff-text-muted); }
+body > .muted { margin: 0 0 12px; }
+.account { background: var(--ff-surface-raised); border: 1px solid var(--ff-border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+.account h2 { margin: 0 0 6px; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account label { display: block; color: var(--ff-text-muted); font-size: 11px; }
+select, input { box-sizing: border-box; width: 100%; margin-top: 3px; background: var(--ff-background); color: var(--ff-text); border: 1px solid var(--ff-border); border-radius: 4px; padding: 3px 6px; font: inherit; }
+.account.unpicked label select { border-color: var(--ff-accent); }
+button { margin: 6px 6px 0 0; background: var(--ff-surface); color: var(--ff-text); border: 1px solid var(--ff-border); border-radius: 4px; padding: 3px 10px; font: inherit; cursor: pointer; }
+button:hover { border-color: var(--ff-accent); }
+button.quiet { margin: 0 0 0 6px; padding: 0 5px; border-color: transparent; background: none; color: var(--ff-text-muted); font-size: 11px; }
+button.quiet:hover, button.chosen { color: var(--ff-accent); }
+.problem { color: var(--ff-danger); }
+.class { margin-top: 8px; }
+.sort { margin-top: 8px; color: var(--ff-text-muted); font-size: 11px; }
+.row { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--ff-border); }
+.row.current .name { color: var(--ff-accent); }
+.name { margin: 0; font-weight: 600; }
+.rates { font-size: 11px; }
+.confirm { margin-left: 6px; color: var(--ff-danger); font-size: 11px; font-weight: 400; }
+.account > div > button.quiet, .account > div > .confirm { display: inline-block; margin: 8px 0 0; padding-left: 0; }
+details { margin-top: 4px; color: var(--ff-text-muted); font-size: 12px; }
+summary { cursor: pointer; }
+#custom .name { margin-top: 6px; color: var(--ff-text); font-weight: 400; }
