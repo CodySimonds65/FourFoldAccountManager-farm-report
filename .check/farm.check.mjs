@@ -1,8 +1,8 @@
 // Checks farm.mjs outside FourFold. Run: node .check/farm.check.mjs
 import assert from 'node:assert/strict';
 import {
-  BUILT_IN, RANKED_MS, UNLABELLED, absorb, addLocation, addTo, createTracker, loadCustom, loadTotals, prune, ranking,
-  removeLocation, reset, step, toRead
+  BUILT_IN, RANKED_MS, UNLABELLED, absorb, addLocation, addTo, createTracker, loadCustom, loadTotals, merged, prune,
+  ranking, removeLocation, reset, step, toRead, waitingMs
 } from '../farm.mjs';
 
 const MIN = 60000;
@@ -120,6 +120,30 @@ const sum = (counted, key) => counted.reduce((total, part) => total + part[key],
   } });
   assert.deepEqual(Object.keys(waiting), ['b']);
   assert.equal(absorb(waiting, totals, 'a', 'bellroot-arena'), false);
+}
+
+// While a pick is still settling, the panel shows the unlabelled minutes under it without saving anything: the pick
+// can change again (arrow keys pass through every option on the way), and the minutes must follow it.
+{
+  const totals = {};
+  const waiting = {};
+  addTo(totals, 'a', 'bellroot-arena', { className: 'Warrior', ms: MIN, xp: 10, silver: 5, gold: 1 });
+  addTo(waiting, 'a', UNLABELLED, { className: 'Warrior', ms: 2 * MIN, xp: 30, silver: 0, gold: 2 });
+  addTo(waiting, 'a', UNLABELLED, { className: 'Mage', ms: 3 * MIN, xp: 1, silver: 1, gold: 1 });
+  const before = JSON.stringify([totals, waiting]);
+
+  // Unlabelled is one thing per account, whatever class fought it.
+  assert.equal(waitingMs(waiting, 'a'), 5 * MIN);
+  assert.equal(waitingMs(waiting, 'nobody'), 0);
+
+  const first = merged(totals, waiting, 'a', 'bellroot-arena');
+  assert.deepEqual(first.a.Warrior, { 'bellroot-arena': { ms: 3 * MIN, xp: 40, silver: 5, gold: 3 } });
+  assert.deepEqual(first.a.Mage, { 'bellroot-arena': { ms: 3 * MIN, xp: 1, silver: 1, gold: 1 } });
+  const second = merged(totals, waiting, 'a', 'westhills-arena');
+  assert.deepEqual(second.a.Warrior['westhills-arena'], { ms: 2 * MIN, xp: 30, silver: 0, gold: 2 });
+  assert.deepEqual(second.a.Warrior['bellroot-arena'], { ms: MIN, xp: 10, silver: 5, gold: 1 });
+  assert.equal(JSON.stringify([totals, waiting]), before);
+  assert.equal(merged(totals, {}, 'a', 'westhills-arena'), totals);
 }
 
 // The ranking: rates per hour, sorted by the chosen column, with locations still collecting last.

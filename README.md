@@ -13,7 +13,8 @@ The game doesn't say which arena a character is in: its profile reads "Arena" in
 "Battle" in a fight. So you tell the plugin: pick the location in the account's **Farming** list before you go in.
 The list has the game's arenas and dungeons, and **Add location…** adds your own.
 
-- Fighting with nothing picked shows as **Unlabelled**. Pick the location and those minutes move to it. If they were
+- Fighting with nothing picked shows as **Unlabelled**. Pick the location and those minutes show under it at once.
+  For the next half minute they follow the pick if you change it; after that they stay where they are. If they were
   fought somewhere else, discard them first. Unlabelled is kept until the account closes.
 - A pick lasts until the account closes or FourFold restarts. It isn't remembered, so that a forgotten pick ends up
   in Unlabelled, where you can fix it, and not under the wrong location.

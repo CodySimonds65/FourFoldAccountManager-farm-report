@@ -1,8 +1,8 @@
 // Farm report: XP, silver and gold per hour by where each account is fighting. The game never names the arena, so
 // the user picks it. The counting rules are in farm.mjs.
 import {
-  BUILT_IN, UNLABELLED, absorb, addLocation, addTo, createTracker, isFighting, loadCustom, loadTotals, prune, ranking,
-  removeLocation, reset, step, toRead
+  BUILT_IN, UNLABELLED, absorb, addLocation, addTo, createTracker, isFighting, loadCustom, loadTotals, merged, prune,
+  ranking, removeLocation, reset, step, toRead, waitingMs
 } from './farm.mjs';
 
 const container = document.getElementById('accounts');
@@ -18,6 +18,10 @@ let saveCustom = false;
 // ever join a location picked in the same session.
 const unlabelled = {};
 const picks = new Map(); // account id -> location id. In memory only: a forgotten pick must not outlive the session.
+const pickedAt = new Map(); // account id -> when its pick last changed
+// A pick takes the unlabelled minutes for good only once it has stood this long. Until then they are shown under it
+// but not moved: arrow keys pass through every option on the way, and a mis-click gets corrected.
+const SETTLE_MS = 30000;
 const trackers = new Map(); // account id -> tracker; open accounts only
 const blocks = new Map(); // account id -> that account's elements in the panel
 const shown = new Map(); // account id -> { label, className, fighting }: what the last refresh saw
@@ -106,11 +110,20 @@ function confirmed(key, text, title, act) {
   return box;
 }
 
-// Sets what an account is farming. Whatever it fought unlabelled this session was fought there, so it moves over.
+// Sets what an account is farming. What it fought unlabelled this session shows under the pick at once, and is
+// moved there for good by settle().
 function pick(id, locationId) {
   picks.set(id, locationId);
-  if (absorb(unlabelled, totals, id, locationId)) saveTotals = true;
+  pickedAt.set(id, Date.now());
 }
+
+// Moves an account's unlabelled minutes into its pick and marks the totals for saving.
+function settle(id) {
+  if (picks.has(id) && absorb(unlabelled, totals, id, picks.get(id))) saveTotals = true;
+}
+
+// An account's totals as the panel and card show them: with unlabelled minutes under the pick while it settles.
+const shownTotals = id => (picks.has(id) ? merged(totals, unlabelled, id, picks.get(id)) : totals);
 
 // One account's block, built once. Its handlers look the account up by id, so they never hold stale data.
 function createBlock(id) {
@@ -169,7 +182,8 @@ function createBlock(id) {
 // The body of one account's block: its class's ranking, the resets, and Unlabelled while nothing is picked.
 function body(id, className) {
   const rows = [];
-  const classes = Object.keys(totals[id] ?? {});
+  const view = shownTotals(id);
+  const classes = Object.keys(view[id] ?? {});
   if (!classes.includes(className)) classes.unshift(className);
   if (classes.length > 1) {
     const choose = element('select', 'class');
@@ -182,17 +196,18 @@ function body(id, className) {
     rows.push(choose);
   }
 
-  // Only while nothing is picked: once there is a pick, these minutes have joined it.
-  const waiting = picks.has(id) ? undefined : unlabelled[id]?.[className]?.[UNLABELLED];
-  if (waiting) {
+  // Only while nothing is picked: once there is a pick, these minutes show under it. One row for the account,
+  // whatever class fought them, because the next pick takes them all.
+  const waiting = picks.has(id) ? 0 : waitingMs(unlabelled, id);
+  if (waiting > 0) {
     const row = element('div', 'row unlabelled');
-    const head = element('p', 'name', `Unlabelled · ${span(waiting.ms)}`);
-    head.append(confirmed(`${id}|discard`, 'Discard', 'Discard', () => reset(unlabelled, id, className, UNLABELLED)));
+    const head = element('p', 'name', `Unlabelled · ${span(waiting)}`);
+    head.append(confirmed(`${id}|discard`, 'Discard', 'Discard', () => { delete unlabelled[id]; }));
     row.append(head, element('p', 'rates muted', 'Pick a location above to count it there.'));
     rows.push(row);
   }
 
-  const ranked = ranking(totals, id, className, sortKey);
+  const ranked = ranking(view, id, className, sortKey);
   if (ranked.length > 0) {
     const sort = element('p', 'sort', 'Best by ');
     for (const [key, text] of [['xp', 'XP'], ['silver', 'Silver'], ['gold', 'Gold']]) {
@@ -207,6 +222,8 @@ function body(id, className) {
     const row = element('div', picks.get(id) === entry.id ? 'row current' : 'row');
     const head = element('p', 'name', `${nameOf(entry.id)} · ${span(entry.ms)}`);
     head.append(confirmed(`${id}|${entry.id}`, '×', 'Reset', () => {
+      // What is on show is what gets reset, so minutes still settling under the pick are moved in first.
+      settle(id);
       reset(totals, id, className, entry.id);
       saveTotals = true;
     }));
@@ -221,8 +238,9 @@ function body(id, className) {
     rows.push(row);
   }
 
-  if (ranked.length === 0 && !waiting) rows.push(element('p', 'muted', `Nothing counted for ${className} yet.`));
+  if (ranked.length === 0 && waiting === 0) rows.push(element('p', 'muted', `Nothing counted for ${className} yet.`));
   if (ranked.length > 0) rows.push(confirmed(`${id}|class`, `Reset ${className}`, `Reset all of ${className}`, () => {
+    settle(id);
     reset(totals, id, className);
     saveTotals = true;
   }));
@@ -254,7 +272,7 @@ function redraw(force = false) {
     }
     if (force || !parts.body.contains(document.activeElement)) {
       const chosen = classChoice.get(id);
-      const className = chosen && totals[id]?.[chosen] ? chosen : account.className;
+      const className = chosen && shownTotals(id)[id]?.[chosen] ? chosen : account.className;
       if (className) parts.body.replaceChildren(...body(id, className));
       else parts.body.replaceChildren(element('p', 'muted', 'Waiting for this account\'s first read.'));
     }
@@ -281,7 +299,7 @@ function redraw(force = false) {
 
 async function setCard(id, className) {
   const pick = picks.get(id);
-  const ranked = className ? ranking(totals, id, className, 'xp') : [];
+  const ranked = className ? ranking(shownTotals(id), id, className, 'xp') : [];
   const mine = ranked.find(entry => entry.id === pick);
   const best = ranked.find(entry => entry.ranked);
   const rows = [{ label: 'Farming', value: fit(pick ? nameOf(pick) : 'Not picked') }];
@@ -305,8 +323,11 @@ async function refresh() {
   // A closed account's session is over: its pick and its card go with it.
   for (const id of [...trackers.keys()]) {
     if (open.every(account => account.id !== id)) {
+      // Its session is over: what it fought unlabelled joins the pick it closed with, or goes.
+      settle(id);
       trackers.delete(id);
       picks.delete(id);
+      pickedAt.delete(id);
       classChoice.delete(id);
       delete unlabelled[id];
       await fourfold.cards.clear('farm', id).catch(() => {});
@@ -325,6 +346,7 @@ async function refresh() {
     } else if (counted) {
       addTo(unlabelled, account.id, UNLABELLED, counted);
     }
+    if (picks.has(account.id) && Date.now() - pickedAt.get(account.id) >= SETTLE_MS) settle(account.id);
     shown.set(account.id, {
       label: account.label,
       className: tracker.last?.className ?? null,

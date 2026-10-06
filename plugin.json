@@ -2,7 +2,7 @@
   "id": "fourfold.farm-report",
   "name": "Farm report",
   "shortLabel": "Farm",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "FourFold",
   "description": "XP, silver and gold per hour by where each account is fighting, to show which arena pays best.",
   "apiVersion": 2,

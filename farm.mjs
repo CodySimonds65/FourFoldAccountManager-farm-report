@@ -136,6 +136,20 @@ export function absorb(waiting, totals, accountId, locationId) {
   return true;
 }
 
+// How long an account has fought unlabelled this session, over every class: Unlabelled is one thing per account.
+export function waitingMs(waiting, accountId) {
+  return Object.values(waiting[accountId] ?? {}).reduce((total, byLocation) => total + (byLocation[UNLABELLED]?.ms ?? 0), 0);
+}
+
+// The account's totals as the panel shows them while a pick is settling: with its unlabelled minutes already under
+// the pick, but nothing moved or saved. The pick can still change, and then they show under the new one.
+export function merged(totals, waiting, accountId, locationId) {
+  if (!waiting[accountId]) return totals;
+  const shown = structuredClone({ [accountId]: totals[accountId] ?? {} });
+  absorb(structuredClone({ [accountId]: waiting[accountId] }), shown, accountId, locationId);
+  return shown;
+}
+
 // Drops a location's data from every account and class, as when the user deletes one of their own.
 export function removeLocation(totals, locationId) {
   for (const accountId of Object.keys(totals)) {
