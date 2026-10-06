@@ -1,8 +1,8 @@
 // Farm report: XP, silver and gold per hour by where each account is fighting. The game never names the arena, so
 // the user picks it. The counting rules are in farm.mjs.
 import {
-  BUILT_IN, UNLABELLED, absorb, addLocation, addTo, createTracker, isFighting, loadCustom, loadTotals, merged, prune,
-  ranking, removeLocation, reset, step, toRead, waitingMs
+  BUILT_IN, UNLABELLED, absorb, addLocation, addTo, createTracker, isFighting, loadCustom, loadTotals, merged, prefix,
+  prune, ranking, removeLocation, reset, step, toRead, waitingMs
 } from './farm.mjs';
 
 const container = document.getElementById('accounts');
@@ -34,7 +34,10 @@ const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFra
 // The panel is narrow, so a big number is shown compact. Its exact value is on hover.
 const short = value => (Math.abs(value) >= 100000 ? compact.format(value) : exact(value));
 // A card's text can be at most 40 characters, and FourFold refuses a longer line, so clip it.
-const fit = text => (text.length > 40 ? `${text.slice(0, 39)}…` : text);
+const fit = text => (text.length > 40 ? `${prefix(text, 39)}…` : text);
+// A location's name with what follows it, in a card's 40 characters. When they don't fit, the name gives way, so
+// the number and its unit are never the part that is cut.
+const named = (name, rest) => (name.length + rest.length > 40 ? `${prefix(name, 39 - rest.length)}…${rest}` : `${name}${rest}`);
 const nameOf = id => [...BUILT_IN, ...custom].find(location => location.id === id)?.name ?? 'Removed location';
 const warn = error => console.warn(error.code ?? error.message);
 
@@ -308,9 +311,9 @@ async function setCard(id, className) {
       { label: 'XP/hr', value: mine?.ranked ? short(mine.xp) : 'Collecting' },
       { label: 'Silver/hr', value: mine?.ranked ? short(mine.silver) : 'Collecting' });
   }
-  if (best && best.id !== pick) rows.push({ label: 'Best', value: fit(`${nameOf(best.id)} ${short(best.xp)}`) });
-  const summary = !pick ? 'Not picked' : mine?.ranked ? `${nameOf(pick)}: ${short(mine.xp)} XP/hr` : `${nameOf(pick)}: collecting`;
-  await fourfold.cards.set('farm', id, { summary: fit(summary), rows });
+  if (best && best.id !== pick) rows.push({ label: 'Best', value: named(nameOf(best.id), ` ${short(best.xp)}`) });
+  const summary = !pick ? 'Not picked' : named(nameOf(pick), mine?.ranked ? `: ${short(mine.xp)} XP/hr` : ': collecting');
+  await fourfold.cards.set('farm', id, { summary, rows });
 }
 
 async function refresh() {
@@ -334,11 +337,17 @@ async function refresh() {
     }
   }
 
-  shown.clear();
+  const seen = new Map();
   for (const account of open) {
     let tracker = trackers.get(account.id);
     if (!tracker) trackers.set(account.id, (tracker = createTracker()));
-    const read = toRead(await fourfold.xp.get(account.id), await fourfold.profile.get(account.id));
+    const xp = await fourfold.xp.get(account.id);
+    const profile = await fourfold.profile.get(account.id);
+    // FourFold has started this account's tracking over (its profile was edited, say). The reads before and after
+    // may not even be of the same player, so nothing is measured across the restart.
+    if (xp.updatedAt === null) trackers.set(account.id, (tracker = createTracker()));
+    // Both answers come from one read. If a new read landed between the two calls, wait for the next refresh.
+    const read = xp.updatedAt === profile.updatedAt ? toRead(xp, profile) : null;
     const counted = read ? step(tracker, read) : null;
     if (counted && picks.has(account.id)) {
       addTo(totals, account.id, picks.get(account.id), counted);
@@ -347,25 +356,28 @@ async function refresh() {
       addTo(unlabelled, account.id, UNLABELLED, counted);
     }
     if (picks.has(account.id) && Date.now() - pickedAt.get(account.id) >= SETTLE_MS) settle(account.id);
-    shown.set(account.id, {
-      label: account.label,
-      className: tracker.last?.className ?? null,
-      fighting: Boolean(read) && isFighting(read.location)
-    });
+    const className = tracker.last?.className ?? null;
+    // A choice of which class to look at doesn't outlive a change of the class being played.
+    if (shown.get(account.id)?.className !== className) classChoice.delete(account.id);
+    seen.set(account.id, { label: account.label, className, fighting: isFighting(tracker.last?.location) });
   }
+  // Swapped in whole, so a click that lands while the reads are still coming in finds every block in place.
+  shown.clear();
+  for (const [id, account] of seen) shown.set(id, account);
 
   redraw();
   for (const [id, account] of shown) {
     // A refused card must not stop the panel from updating.
     await setCard(id, account.className).catch(warn);
   }
-  if (saveTotals) {
-    saveTotals = false;
-    await fourfold.storage.set('totals', totals).catch(warn);
-  }
+  // A refused save is tried again at the next refresh. The locations go first, because the totals name them.
   if (saveCustom) {
     saveCustom = false;
-    await fourfold.storage.set('custom', custom).catch(warn);
+    await fourfold.storage.set('custom', custom).catch(error => { saveCustom = true; warn(error); });
+  }
+  if (saveTotals) {
+    saveTotals = false;
+    await fourfold.storage.set('totals', totals).catch(error => { saveTotals = true; warn(error); });
   }
 }
 

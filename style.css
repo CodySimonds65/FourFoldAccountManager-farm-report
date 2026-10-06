@@ -1,6 +1,6 @@
 body { margin: 0; padding: 14px; background: var(--ff-surface); color: var(--ff-text); font: 13px "Segoe UI", sans-serif; }
 h1 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
-p { margin: 3px 0 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+p { margin: 3px 0 0; font-size: 12px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .muted { color: var(--ff-text-muted); }
 body > .muted { margin: 0 0 12px; }
 .account { background: var(--ff-surface-raised); border: 1px solid var(--ff-border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }

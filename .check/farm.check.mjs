@@ -1,8 +1,8 @@
 // Checks farm.mjs outside FourFold. Run: node .check/farm.check.mjs
 import assert from 'node:assert/strict';
 import {
-  BUILT_IN, RANKED_MS, UNLABELLED, absorb, addLocation, addTo, createTracker, loadCustom, loadTotals, merged, prune,
-  ranking, removeLocation, reset, step, toRead, waitingMs
+  BUILT_IN, RANKED_MS, UNLABELLED, absorb, addLocation, addTo, createTracker, loadCustom, loadTotals, merged, prefix,
+  prune, ranking, removeLocation, reset, step, toRead, waitingMs
 } from '../farm.mjs';
 
 const MIN = 60000;
@@ -56,6 +56,16 @@ const sum = (counted, key) => counted.reduce((total, part) => total + part[key],
   const counted = run(read(0, 'Battle'), read(4, 'Battle', { xp: 500 }), read(5, 'Battle', { xp: 500 }));
   assert.equal(sum(counted, 'ms'), MIN);
   assert.equal(sum(counted, 'xp'), 0);
+}
+
+// A gap with nothing gained across it doesn't wake an idle account. Only a gain does.
+{
+  const counted = run(
+    read(0, 'Battle'),
+    read(1, 'Battle', { xp: 10 }),
+    ...[2, 3, 4, 5, 6, 7, 8, 12, 13, 14].map(minute => read(minute, 'Battle', { xp: 10 })));
+  // 0-1 (a gain) and 1-6 (five quiet minutes). The gap from 8 to 12 changes nothing, so 12-14 stay paused.
+  assert.equal(sum(counted, 'ms'), 6 * MIN);
 }
 
 // A class switch drops its interval; later time goes to the new class.
@@ -194,6 +204,11 @@ const sum = (counted, key) => counted.reduce((total, part) => total + part[key],
   assert.equal(addLocation(custom, 'Line\nbreak‮').name, 'Linebreak');
   assert.equal(addLocation(custom, 'x'.repeat(80)).name.length, 30);
   assert.deepEqual(custom.map(location => location.id), ['custom-1', 'custom-2', 'custom-3']);
+  // A cut never lands in the middle of an emoji, which would leave half a character a card refuses.
+  assert.equal(addLocation(custom, 'y'.repeat(29) + '😀').name, 'y'.repeat(29));
+  assert.equal(prefix('ab😀cd', 3), 'ab');
+  assert.equal(prefix('ab😀cd', 4), 'ab😀');
+  assert.equal(prefix('abc', 10), 'abc');
 }
 
 // The built-in list, and saved data that isn't what the plugin wrote.

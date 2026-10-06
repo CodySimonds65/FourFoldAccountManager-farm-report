@@ -78,12 +78,6 @@ export function step(tracker, read) {
   }
 
   const ms = read.at - previous.at;
-  if (ms > MAX_INTERVAL_MS) {
-    // Nothing trustworthy to measure across the gap, so counting starts fresh from here.
-    tracker.lastGainAt = read.at;
-    return null;
-  }
-
   const sameClass = previous.className === read.className;
   const gain = {
     xp: sameClass ? xpGained(previous, read) : 0,
@@ -92,7 +86,10 @@ export function step(tracker, read) {
   };
   const gained = gain.xp > 0 || gain.silver > 0 || gain.gold > 0;
   const wasIdle = previous.at - tracker.lastGainAt >= IDLE_MS;
+  // A gain wakes an idle account, and so does one that arrived somewhere in a gap. A gap with nothing gained doesn't.
   if (gained) tracker.lastGainAt = read.at;
+  // What happened across a gap is unknown, so it isn't counted, gain and all.
+  if (ms > MAX_INTERVAL_MS) return null;
 
   // By where the interval started: the minute that ends back in town still holds the last battle's reward, and the
   // minute spent walking to the arena holds none.
@@ -184,7 +181,18 @@ export function ranking(totals, accountId, className, key) {
 // A name as typed: without control or invisible formatting characters (a card refuses text that has them), with
 // runs of spaces closed up, and at most 30 characters so it fits a card's row.
 function cleanName(text) {
-  return String(text).replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 30).trim();
+  return prefix(String(text).replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/g, ' ').trim(), 30).trim();
+}
+
+// The start of a text, as whole characters, in at most `max` UTF-16 units (what FourFold counts a card's 40 in):
+// a cut never splits an emoji in two.
+export function prefix(text, max) {
+  let kept = '';
+  for (const character of text) {
+    if (kept.length + character.length > max) break;
+    kept += character;
+  }
+  return kept;
 }
 
 // Adds one of the user's own locations. Returns it, or null when the name is empty or already in use.
