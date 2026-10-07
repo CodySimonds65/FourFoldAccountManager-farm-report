@@ -66,13 +66,15 @@ function option(value, text) {
 }
 
 // A control that asks "Yes / No" in its own place before it acts, because confirm() does nothing in a plugin page.
-function confirmed(key, text, title, act) {
+// `label` names a control whose text alone (×) means nothing to a screen reader.
+function confirmed(key, text, title, act, label) {
   if (confirming !== key) {
     const ask = button(text, 'quiet', () => {
       confirming = key;
       redraw(true);
     });
     ask.title = title;
+    if (label) ask.setAttribute('aria-label', label);
     return ask;
   }
   const box = element('span', 'confirm', `${title}? `);
@@ -126,6 +128,7 @@ function body(id, className) {
   if (!classes.includes(className)) classes.unshift(className);
   if (classes.length > 1) {
     const choose = element('select', 'class');
+    choose.setAttribute('aria-label', 'Class');
     choose.append(...classes.map(name => option(name, name)));
     choose.value = className;
     choose.addEventListener('change', () => {
@@ -139,10 +142,12 @@ function body(id, className) {
   if (ranked.length > 0) {
     const sort = element('p', 'sort', 'Best by ');
     for (const [key, text] of [['xp', 'XP'], ['silver', 'Silver']]) {
-      sort.append(button(text, key === sortKey ? 'quiet chosen' : 'quiet', () => {
+      const choice = button(text, key === sortKey ? 'quiet chosen' : 'quiet', () => {
         sortKey = key;
         redraw(true);
-      }));
+      });
+      choice.setAttribute('aria-pressed', String(key === sortKey));
+      sort.append(choice);
     }
     rows.push(sort);
   }
@@ -155,7 +160,7 @@ function body(id, className) {
     head.append(confirmed(`${id}|${entry.id}`, '×', 'Reset', () => {
       reset(totals, id, className, entry.id);
       saveTotals = true;
-    }));
+    }, `Reset ${areaName(entry.id)}`));
     row.append(head);
     if (entry.rated) {
       const rates = element('p', 'rates', `${short(entry.xp)} XP · ${short(entry.silver)} silver /hr`);
@@ -251,6 +256,9 @@ async function refresh() {
     }
   }
 
+  // The status read at start failed: nothing counts until the feed's state is known, so ask again.
+  if (feed.state === null) feed = await fourfold.live.getStatus().catch(() => feed);
+
   shown.clear();
   for (const account of open) {
     // Before an account's first fight, its class is what the last read saw.
@@ -259,6 +267,14 @@ async function refresh() {
       if (typeof xp?.className === 'string') classOf.set(account.id, xp.className);
     }
     shown.set(account.id, { label: account.label });
+    // After a restart, or the feed coming back, the area is unknown until the next scene load, and the fight under
+    // way would count nothing. FourFold knows the scene now, so start from it.
+    if (feed.state === 'active' && !trackers.get(account.id)?.area) {
+      const where = await fourfold.location.get(account.id).catch(() => null);
+      if (where?.scene) {
+        liveEvent(account.id, { type: 'location', at: Date.parse(where.at), scene: where.scene, inBattle: where.inBattle });
+      }
+    }
     // Time passing between fights: keeps an area's clock current, and lets the idle rule pause it.
     liveEvent(account.id, { type: 'tick', at: Date.now() });
   }
@@ -288,8 +304,22 @@ function render() {
   return queue;
 }
 
+// A move or a fight start changes the card's area, which shouldn't wait for the next refresh. Its write joins the
+// refresh queue, so it never races a refresh's own, and a burst of events writes each card once. It doesn't save:
+// those events add no reward, and the next refresh saves any time they added.
+const cardsDue = new Set();
+function updateCard(id) {
+  if (cardsDue.has(id)) return;
+  cardsDue.add(id);
+  queue = queue.then(() => {
+    cardsDue.delete(id);
+    // An account the last refresh didn't see open has no card to keep current.
+    if (shown.has(id)) return setCard(id);
+  }).catch(warn);
+}
+
 // Live events arrive one at a time, every few seconds while fighting. A fight's reward goes through a full refresh,
-// which also saves it and updates the card; the rest only need the panel redrawn.
+// which also saves it and updates the card; a move or a fight start redraws the panel and updates the card.
 function listen() {
   const at = event => Date.parse(event.at);
   fourfold.live.onStatusChanged(status => {
@@ -301,10 +331,12 @@ function listen() {
   fourfold.location.onChanged(event => {
     liveEvent(event.accountId, { type: 'location', at: at(event), scene: event.scene, inBattle: event.inBattle });
     redraw();
+    updateCard(event.accountId);
   });
   fourfold.battle.onStarted(event => {
     liveEvent(event.accountId, { type: 'start', at: at(event) });
     redraw();
+    updateCard(event.accountId);
   });
   fourfold.battle.onResult(event => {
     liveEvent(event.accountId, {
