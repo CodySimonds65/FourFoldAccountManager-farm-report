@@ -24,14 +24,17 @@ export function createLiveTracker() {
 // 'result' (with xp and silver), 'disconnect', or 'tick' (time passing with nothing new). Returns what it adds
 // ({ area, className, ms, xp, silver, battles }), or null when it adds nothing.
 export function liveStep(tracker, event) {
-  // Late or out of order: the time it would cover was already counted.
-  if (tracker.at !== null && event.at < tracker.at) return null;
+  // Late: FourFold stamps an event as it arrives and hands it over a moment later, so the panel's tick can land in
+  // between. Its move and its reward still count, but the time up to `tracker.at` was already counted, so it adds
+  // none and the clock stays where it is.
+  const late = tracker.at !== null && event.at < tracker.at;
   const previousAt = tracker.at;
-  tracker.at = event.at;
+  if (!late) tracker.at = event.at;
 
   // The time since the previous event goes to the area whose clock was running: walking between fights counts,
   // five quiet minutes still count, then the clock pauses until the next fight.
-  const ms = previousAt === null ? 0 : event.at - previousAt;
+  const ms = previousAt === null || late ? 0 : event.at - previousAt;
+  const activityAt = Math.max(event.at, tracker.lastActivityAt ?? event.at);
   const idle = tracker.lastActivityAt === null || previousAt - tracker.lastActivityAt >= IDLE_MS;
   const counted = { area: tracker.active, className: event.className, ms: 0, xp: 0, silver: 0, battles: 0 };
   if (tracker.active !== null && !idle && ms <= MAX_INTERVAL_MS) counted.ms = ms;
@@ -46,12 +49,12 @@ export function liveStep(tracker, event) {
       break;
     case 'start':
       if (tracker.area !== null) tracker.active = tracker.area;
-      tracker.lastActivityAt = event.at;
+      tracker.lastActivityAt = activityAt;
       break;
     case 'result':
       // A reward without its fight start (the panel opened mid-fight) still belongs to the area it came from.
       tracker.active ??= tracker.area;
-      tracker.lastActivityAt = event.at;
+      tracker.lastActivityAt = activityAt;
       if (tracker.active !== null) {
         counted.area = tracker.active;
         counted.xp = event.xp;

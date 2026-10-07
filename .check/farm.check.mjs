@@ -78,10 +78,39 @@ const result = (at, xp, silver, className) => ({ type: 'result', at, xp, silver,
   assert.deepEqual(area(DUNGEON), { ms: 30 * SEC, xp: 88, silver: 11, battles: 1 });
 }
 
-// A reward that arrives without its fight start (the panel opened mid-fight) still counts for the area it came from.
-// Events out of order, or with no class yet, count nothing.
+// An event FourFold stamped a few ms before the panel's last tick, but delivered after it, still counts its reward or
+// its move. It adds no time, since the tick already counted up to its own time, and the tracker's clock never runs
+// backwards.
 {
-  const { area } = live(enter(0, DUNGEON), result(30 * SEC, 9, 3), result(20 * SEC, 500, 500));
+  const tracker = createLiveTracker();
+  const totals = {};
+  const step = event => {
+    const counted = liveStep(tracker, { className: 'Bandit', ...event, at: start + event.at });
+    if (counted) addLive(totals, 'a', counted);
+    return counted;
+  };
+  step(enter(0, DUNGEON));
+  step(begin(0));
+  step({ type: 'tick', at: 30 * SEC });
+  assert.deepEqual(step(result(30 * SEC - 5, 40, 15)), { area: DUNGEON, className: 'Bandit', ms: 0, xp: 40, silver: 15, battles: 1 });
+  assert.equal(tracker.at, start + 30 * SEC);
+  step({ type: 'tick', at: 40 * SEC });
+  assert.deepEqual(totals.a.Bandit[DUNGEON], { ms: 40 * SEC, xp: 40, silver: 15, battles: 1 });
+
+  // A late move still moves the account: the next fight counts for the new area.
+  step(enter(40 * SEC - 5, 'coldwoods_arena'));
+  assert.equal(tracker.area, 'coldwoods_arena');
+  assert.equal(tracker.at, start + 40 * SEC);
+  step(begin(45 * SEC));
+  step(result(60 * SEC, 20, 2));
+  assert.deepEqual(totals.a.Bandit.coldwoods_arena, { ms: 15 * SEC, xp: 20, silver: 2, battles: 1 });
+  assert.equal(totals.a.Bandit[DUNGEON].ms, 40 * SEC);
+}
+
+// A reward that arrives without its fight start (the panel opened mid-fight) still counts for the area it came from.
+// Events with no class yet count nothing.
+{
+  const { area } = live(enter(0, DUNGEON), result(30 * SEC, 9, 3));
   assert.deepEqual(area(DUNGEON), { ms: 0, xp: 9, silver: 3, battles: 1 });
   const tracker = createLiveTracker();
   liveStep(tracker, { type: 'location', at: start, scene: DUNGEON, inBattle: false, className: null });
