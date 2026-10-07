@@ -1,6 +1,6 @@
 // Types for window.fourfold, the API FourFold Account Manager gives a plugin's page.
 //
-// Describes plugin API version 2. The current copy of this file is in the plugin template:
+// Describes plugin API version 3. The current copy of this file is in the plugin template:
 //   https://github.com/CodySimonds65/FourFoldAccountManager-plugin-template/blob/main/fourfold.d.ts
 // The API is documented in full in PLUGIN_AUTHORS.md:
 //   https://github.com/CodySimonds65/FourFoldAccountManager/blob/main/PLUGIN_AUTHORS.md
